@@ -154,12 +154,21 @@ func (o *OpenAI) FunctionCall(ctx context.Context, messages []Message, tools []T
 	// 转换工具格式
 	openaiTools := make([]openai.Tool, len(tools))
 	for i, tool := range tools {
+		// 转换参数格式
+		paramsMap := map[string]interface{}{
+			"type":       tool.Parameters.Type,
+			"properties": tool.Parameters.Properties,
+		}
+		if len(tool.Parameters.Required) > 0 {
+			paramsMap["required"] = tool.Parameters.Required
+		}
+
 		openaiTools[i] = openai.Tool{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        tool.Name,
 				Description: tool.Description,
-				Parameters:  tool.Parameters,
+				Parameters:  paramsMap,
 			},
 		}
 	}

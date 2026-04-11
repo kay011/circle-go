@@ -2,10 +2,15 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"circle-go/internal/logging"
 )
 
 // Tool 工具接口
@@ -239,9 +244,34 @@ func (t *webSearchTool) Required() []string {
 	return []string{"query"}
 }
 
+// DuckDuckGo API 响应结构
+type ddgResponse struct {
+	Abstract       string `json:"Abstract"`
+	AbstractText   string `json:"AbstractText"`
+	AbstractSource string `json:"AbstractSource"`
+	AbstractURL    string `json:"AbstractURL"`
+	Heading        string `json:"Heading"`
+	Results        []struct {
+		Result  string `json:"Result"`
+		FirstURL string `json:"FirstURL"`
+		Text    string `json:"Text"`
+	} `json:"Results"`
+	RelatedTopics []struct {
+		Result  string `json:"Result"`
+		FirstURL string `json:"FirstURL"`
+		Text    string `json:"Text"`
+	} `json:"RelatedTopics"`
+}
+
 func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (string, error) {
+	// 初始化日志记录器
+	logger := logging.NewLogger(logging.INFO, "WebSearchTool")
+	
 	query, ok := args["query"].(string)
 	if !ok {
+		logger.Error("无效的查询类型", map[string]interface{}{
+			"args": args,
+		})
 		return "", fmt.Errorf("invalid query type")
 	}
 
@@ -252,18 +282,124 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (s
 		}
 	}
 
-	// 模拟搜索结果（实际应用中应调用真实的搜索API）
-	results := []string{
-		fmt.Sprintf("搜索结果1: 关于'%s'的信息...", query),
-		fmt.Sprintf("搜索结果2: 更多关于'%s'的内容...", query),
-		fmt.Sprintf("搜索结果3: '%s'的相关资源...", query),
+	logger.Info("开始搜索", map[string]interface{}{
+		"query": query,
+		"num_results": numResults,
+	})
+
+	// 构建 DuckDuckGo API URL
+	apiURL := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&pretty=1", query)
+	logger.Info("构建API URL", map[string]interface{}{
+		"url": apiURL,
+	})
+
+	// 创建 HTTP 客户端
+	client := &http.Client{
+		Timeout: 10 * time.Second,
 	}
 
-	if numResults > len(results) {
-		numResults = len(results)
+	// 发送请求
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		logger.Error("创建请求失败", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resultStr := strings.Join(results[:numResults], "\n")
+	logger.Info("发送请求", map[string]interface{}{
+		"method": req.Method,
+		"url": req.URL.String(),
+	})
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Error("发送请求失败", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 检查响应状态
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("API返回非OK状态", map[string]interface{}{
+			"status_code": resp.StatusCode,
+			"status": resp.Status,
+		})
+		return "", fmt.Errorf("API returned non-OK status: %s", resp.Status)
+	}
+
+	logger.Info("收到响应", map[string]interface{}{
+		"status_code": resp.StatusCode,
+	})
+
+	// 解析响应
+	var ddgResp ddgResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ddgResp); err != nil {
+		logger.Error("解析响应失败", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	logger.Info("解析响应成功", map[string]interface{}{
+		"has_abstract": ddgResp.Abstract != "",
+		"result_count": len(ddgResp.Results),
+		"related_topics_count": len(ddgResp.RelatedTopics),
+	})
+
+	// 构建搜索结果
+	var results []string
+
+	// 添加摘要信息（如果有）
+	if ddgResp.Abstract != "" {
+		results = append(results, fmt.Sprintf("摘要: %s", ddgResp.Abstract))
+		if ddgResp.AbstractURL != "" {
+			results = append(results, fmt.Sprintf("来源: %s", ddgResp.AbstractURL))
+		}
+		results = append(results, "")
+	}
+
+	// 添加搜索结果
+	for i, result := range ddgResp.Results {
+		if i >= numResults {
+			break
+		}
+		results = append(results, fmt.Sprintf("结果 %d: %s", i+1, result.Text))
+		if result.FirstURL != "" {
+			results = append(results, fmt.Sprintf("链接: %s", result.FirstURL))
+		}
+		results = append(results, "")
+	}
+
+	// 如果结果不足，添加相关主题
+	if len(results) == 0 || len(ddgResp.Results) < numResults {
+		for i, topic := range ddgResp.RelatedTopics {
+			if i >= numResults-len(ddgResp.Results) {
+				break
+			}
+			results = append(results, fmt.Sprintf("相关主题 %d: %s", i+1, topic.Text))
+			if topic.FirstURL != "" {
+				results = append(results, fmt.Sprintf("链接: %s", topic.FirstURL))
+			}
+			results = append(results, "")
+		}
+	}
+
+	// 如果没有结果
+	if len(results) == 0 {
+		logger.Info("没有找到搜索结果", map[string]interface{}{
+			"query": query,
+		})
+		return fmt.Sprintf("没有找到关于 '%s' 的搜索结果。", query), nil
+	}
+
+	// 格式化结果
+	resultStr := strings.Join(results, "\n")
+	logger.Info("搜索完成", map[string]interface{}{
+		"result_length": len(resultStr),
+	})
 	return fmt.Sprintf("搜索结果:\n%s", resultStr), nil
 }
 

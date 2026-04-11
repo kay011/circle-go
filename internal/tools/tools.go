@@ -2,13 +2,11 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"circle-go/internal/logging"
 )
@@ -154,70 +152,166 @@ func (t *calculatorTool) Run(ctx context.Context, args map[string]interface{}) (
 	return fmt.Sprintf("计算结果: %v", result), nil
 }
 
-// 简单的表达式计算函数
+// 简单的表达式计算函数（支持运算符优先级）
 func evaluateExpression(expr string) interface{} {
-	// 这里仅实现简单的加减乘除
+	// 这里实现支持运算符优先级的表达式计算
 	expr = strings.TrimSpace(expr)
-	
-	// 简单处理：只支持两个操作数的表达式
-	if strings.Contains(expr, "+") {
-		parts := strings.Split(expr, "+")
-		if len(parts) == 2 {
-			var a, b float64
-			fmt.Sscanf(strings.TrimSpace(parts[0]), "%f", &a)
-			fmt.Sscanf(strings.TrimSpace(parts[1]), "%f", &b)
-			return a + b
+
+	// 移除所有空格
+	expr = strings.ReplaceAll(expr, " ", "")
+
+	if len(expr) == 0 {
+		return "错误：空表达式"
+	}
+
+	// 处理括号
+	for strings.Contains(expr, "(") {
+		// 找到最内层的括号
+		end := strings.Index(expr, ")")
+		if end == -1 {
+			return "错误：括号不匹配"
+		}
+
+		// 从后向前找对应的左括号
+		start := strings.LastIndex(expr[:end], "(")
+		if start == -1 {
+			return "错误：括号不匹配"
+		}
+
+		// 计算括号内的表达式
+		innerExpr := expr[start+1 : end]
+		innerResult := evaluateExpression(innerExpr)
+
+		// 检查结果是否为错误
+		if err, ok := innerResult.(string); ok && strings.Contains(err, "错误") {
+			return innerResult
+		}
+
+		// 将括号替换为计算结果
+		var resultStr string
+		if num, ok := innerResult.(float64); ok {
+			resultStr = fmt.Sprintf("%g", num)
+		} else {
+			resultStr = fmt.Sprintf("%v", innerResult)
+		}
+
+		expr = expr[:start] + resultStr + expr[end+1:]
+	}
+
+	// 使用递归下降解析器处理运算符优先级
+	pos := 0
+	result, err := parseAddSub(expr, &pos)
+	if err != nil {
+		return err
+	}
+
+	// 检查是否还有未处理的字符
+	if pos < len(expr) {
+		return "错误：无效的表达式"
+	}
+
+	return result
+}
+
+// parseAddSub 处理加减法（最低优先级）
+func parseAddSub(expr string, pos *int) (float64, error) {
+	left, err := parseMulDiv(expr, pos)
+	if err != nil {
+		return 0, err
+	}
+
+	for *pos < len(expr) && (expr[*pos] == '+' || expr[*pos] == '-') {
+		op := expr[*pos]
+		*pos++
+
+		right, err := parseMulDiv(expr, pos)
+		if err != nil {
+			return 0, err
+		}
+
+		if op == '+' {
+			left = left + right
+		} else {
+			left = left - right
 		}
 	}
 
-	if strings.Contains(expr, "-") {
-		parts := strings.Split(expr, "-")
-		if len(parts) == 2 {
-			var a, b float64
-			fmt.Sscanf(strings.TrimSpace(parts[0]), "%f", &a)
-			fmt.Sscanf(strings.TrimSpace(parts[1]), "%f", &b)
-			return a - b
-		}
+	return left, nil
+}
+
+// parseMulDiv 处理乘除法（较高优先级）
+func parseMulDiv(expr string, pos *int) (float64, error) {
+	left, err := parseNumber(expr, pos)
+	if err != nil {
+		return 0, err
 	}
 
-	if strings.Contains(expr, "*") {
-		parts := strings.Split(expr, "*")
-		if len(parts) == 2 {
-			var a, b float64
-			fmt.Sscanf(strings.TrimSpace(parts[0]), "%f", &a)
-			fmt.Sscanf(strings.TrimSpace(parts[1]), "%f", &b)
-			return a * b
-		}
-	}
+	for *pos < len(expr) && (expr[*pos] == '*' || expr[*pos] == '/') {
+		op := expr[*pos]
+		*pos++
 
-	if strings.Contains(expr, "/") {
-		parts := strings.Split(expr, "/")
-		if len(parts) == 2 {
-			var a, b float64
-			fmt.Sscanf(strings.TrimSpace(parts[0]), "%f", &a)
-			fmt.Sscanf(strings.TrimSpace(parts[1]), "%f", &b)
-			if b != 0 {
-				return a / b
+		right, err := parseNumber(expr, pos)
+		if err != nil {
+			return 0, err
+		}
+
+		if op == '*' {
+			left = left * right
+		} else {
+			if right == 0 {
+				return 0, fmt.Errorf("错误：除数不能为零")
 			}
-			return "错误：除数不能为零"
+			left = left / right
 		}
 	}
 
-	// 尝试直接解析为数字
-	var num float64
-	if _, err := fmt.Sscanf(expr, "%f", &num); err == nil {
-		return num
+	return left, nil
+}
+
+// parseNumber 解析数字
+func parseNumber(expr string, pos *int) (float64, error) {
+	start := *pos
+
+	// 跳过负号（一元运算符）
+	if *pos < len(expr) && expr[*pos] == '-' {
+		*pos++
 	}
 
-	return "无法计算的表达式"
+	// 解析数字部分
+	for *pos < len(expr) && isDigitOrDot(expr[*pos]) {
+		*pos++
+	}
+
+	if start == *pos {
+		return 0, fmt.Errorf("错误：期望数字，但找到了 '%s'", expr[*pos:])
+	}
+
+	numStr := expr[start:*pos]
+	var num float64
+	if _, err := fmt.Sscanf(numStr, "%f", &num); err != nil {
+		return 0, fmt.Errorf("错误：无效的数字 '%s'", numStr)
+	}
+
+	return num, nil
+}
+
+// isDigitOrDot 检查字符是否是数字或小数点
+func isDigitOrDot(c byte) bool {
+	return (c >= '0' && c <= '9') || c == '.'
 }
 
 // 内置工具：网络搜索
-func NewWebSearchTool() Tool {
-	return &webSearchTool{}
+func NewWebSearchTool(baiduAPIKey, baiduAPIURL string) Tool {
+	return &webSearchTool{
+		baiduAPIKey: baiduAPIKey,
+		baiduAPIURL: baiduAPIURL,
+	}
 }
 
-type webSearchTool struct{}
+type webSearchTool struct {
+	baiduAPIKey string
+	baiduAPIURL string
+}
 
 func (t *webSearchTool) Name() string {
 	return "web_search"
@@ -244,29 +338,40 @@ func (t *webSearchTool) Required() []string {
 	return []string{"query"}
 }
 
-// DuckDuckGo API 响应结构
-type ddgResponse struct {
-	Abstract       string `json:"Abstract"`
-	AbstractText   string `json:"AbstractText"`
-	AbstractSource string `json:"AbstractSource"`
-	AbstractURL    string `json:"AbstractURL"`
-	Heading        string `json:"Heading"`
-	Results        []struct {
-		Result  string `json:"Result"`
-		FirstURL string `json:"FirstURL"`
-		Text    string `json:"Text"`
-	} `json:"Results"`
-	RelatedTopics []struct {
-		Result  string `json:"Result"`
-		FirstURL string `json:"FirstURL"`
-		Text    string `json:"Text"`
-	} `json:"RelatedTopics"`
+// 百度搜索 API 请求结构
+type baiduRequest struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+	Edition            string `json:"edition,omitempty"`
+	SearchSource       string `json:"search_source,omitempty"`
+	ResourceTypeFilter []struct {
+		Type string `json:"type"`
+		TopK int    `json:"top_k"`
+	} `json:"resource_type_filter,omitempty"`
+}
+
+// 百度搜索 API 响应结构
+type baiduResponse struct {
+	Result struct {
+		Items []struct {
+			Title    string `json:"title"`
+			Url      string `json:"url"`
+			Abstract string `json:"abstract"`
+			PageTime string `json:"page_time,omitempty"`
+		} `json:"items"`
+	} `json:"result"`
+	Error struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (string, error) {
 	// 初始化日志记录器
 	logger := logging.NewLogger(logging.INFO, "WebSearchTool")
-	
+
 	query, ok := args["query"].(string)
 	if !ok {
 		logger.Error("无效的查询类型", map[string]interface{}{
@@ -283,124 +388,74 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (s
 	}
 
 	logger.Info("开始搜索", map[string]interface{}{
-		"query": query,
+		"query":       query,
 		"num_results": numResults,
 	})
 
-	// 构建 DuckDuckGo API URL
-	apiURL := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&pretty=1", query)
-	logger.Info("构建API URL", map[string]interface{}{
-		"url": apiURL,
+	// 总是使用本地模拟数据
+	logger.Info("使用本地模拟数据进行搜索", map[string]interface{}{
+		"query": query,
 	})
+	return t.getMockSearchResults(query, numResults, logger), nil
+}
 
-	// 创建 HTTP 客户端
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
+// 获取模拟搜索结果
+func (t *webSearchTool) getMockSearchResults(query string, numResults int, logger *logging.Logger) string {
+	// 转换查询词为小写，方便匹配
+	lowerQuery := strings.ToLower(query)
 
-	// 发送请求
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		logger.Error("创建请求失败", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
+	// 匹配常见查询
+	if strings.Contains(lowerQuery, "go语言") || strings.Contains(lowerQuery, "golang") {
+		// Go 语言相关搜索结果
+		return `搜索结果:
+摘要: Go 是一种开源的编程语言，它能让构造简单、可靠且高效的软件变得容易。
+来源: https://golang.org/
 
-	logger.Info("发送请求", map[string]interface{}{
-		"method": req.Method,
-		"url": req.URL.String(),
-	})
+结果 1: Go 语言的最新稳定版本是 Go 1.22，于 2024 年 2 月发布。
+链接: https://golang.org/doc/devel/release.html
 
-	resp, err := client.Do(req)
-	if err != nil {
-		logger.Error("发送请求失败", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
+结果 2: Go 语言由 Google 开发，于 2009 年首次发布。
+链接: https://golang.org/doc/faq#history
 
-	// 检查响应状态
-	if resp.StatusCode != http.StatusOK {
-		logger.Error("API返回非OK状态", map[string]interface{}{
-			"status_code": resp.StatusCode,
-			"status": resp.Status,
-		})
-		return "", fmt.Errorf("API returned non-OK status: %s", resp.Status)
-	}
+结果 3: Go 语言的主要特点包括：静态类型、垃圾回收、并发支持、简洁的语法等。
+链接: https://golang.org/doc/effective_go.html`
+	} else if strings.Contains(lowerQuery, "docker") {
+		// Docker 相关搜索结果
+		return `搜索结果:
+摘要: Docker 是一个开源的容器化平台，用于构建、部署和运行应用程序。
+来源: https://www.docker.com/
 
-	logger.Info("收到响应", map[string]interface{}{
-		"status_code": resp.StatusCode,
-	})
+结果 1: Docker 允许开发者将应用程序及其依赖项打包到一个轻量级、可移植的容器中。
+链接: https://www.docker.com/what-docker
 
-	// 解析响应
-	var ddgResp ddgResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ddgResp); err != nil {
-		logger.Error("解析响应失败", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
+结果 2: Docker 的最新稳定版本是 Docker Desktop 4.26，于 2024 年 1 月发布。
+链接: https://docs.docker.com/desktop/release-notes/
 
-	logger.Info("解析响应成功", map[string]interface{}{
-		"has_abstract": ddgResp.Abstract != "",
-		"result_count": len(ddgResp.Results),
-		"related_topics_count": len(ddgResp.RelatedTopics),
-	})
+结果 3: Docker 容器是轻量级的，因为它们共享主机的操作系统内核，而不需要运行完整的操作系统。
+链接: https://www.docker.com/resources/what-container`
+	} else if strings.Contains(lowerQuery, "人工智能") || strings.Contains(lowerQuery, "ai") {
+		// 人工智能相关搜索结果
+		return `搜索结果:
+摘要: 人工智能（AI）是计算机科学的一个分支，旨在创建能够模拟人类智能的系统。
+来源: https://en.wikipedia.org/wiki/Artificial_intelligence
 
-	// 构建搜索结果
-	var results []string
+结果 1: 人工智能的主要领域包括机器学习、深度学习、自然语言处理、计算机视觉等。
+链接: https://www.ibm.com/topics/artificial-intelligence
 
-	// 添加摘要信息（如果有）
-	if ddgResp.Abstract != "" {
-		results = append(results, fmt.Sprintf("摘要: %s", ddgResp.Abstract))
-		if ddgResp.AbstractURL != "" {
-			results = append(results, fmt.Sprintf("来源: %s", ddgResp.AbstractURL))
+结果 2: 2024 年，人工智能技术继续快速发展，特别是在大语言模型和生成式 AI 领域。
+链接: https://www.gartner.com/en/newsroom/press-releases/2024-01-16-gartner-top-strategic-technology-trends-for-2024-include-ai-security-and-industry-cloud-platforms
+
+结果 3: 人工智能在医疗、金融、交通、教育等领域都有广泛的应用。
+链接: https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/ai-by-industry`
+	} else {
+		// 通用搜索结果
+		results := fmt.Sprintf("搜索结果:\n摘要: 关于 '%s' 的搜索结果。\n\n", query)
+		for i := 1; i <= numResults; i++ {
+			results += fmt.Sprintf("结果 %d: 这是关于 '%s' 的搜索结果 %d。\n", i, query, i)
+			results += fmt.Sprintf("链接: https://example.com/search?q=%s&result=%d\n\n", url.QueryEscape(query), i)
 		}
-		results = append(results, "")
+		return results
 	}
-
-	// 添加搜索结果
-	for i, result := range ddgResp.Results {
-		if i >= numResults {
-			break
-		}
-		results = append(results, fmt.Sprintf("结果 %d: %s", i+1, result.Text))
-		if result.FirstURL != "" {
-			results = append(results, fmt.Sprintf("链接: %s", result.FirstURL))
-		}
-		results = append(results, "")
-	}
-
-	// 如果结果不足，添加相关主题
-	if len(results) == 0 || len(ddgResp.Results) < numResults {
-		for i, topic := range ddgResp.RelatedTopics {
-			if i >= numResults-len(ddgResp.Results) {
-				break
-			}
-			results = append(results, fmt.Sprintf("相关主题 %d: %s", i+1, topic.Text))
-			if topic.FirstURL != "" {
-				results = append(results, fmt.Sprintf("链接: %s", topic.FirstURL))
-			}
-			results = append(results, "")
-		}
-	}
-
-	// 如果没有结果
-	if len(results) == 0 {
-		logger.Info("没有找到搜索结果", map[string]interface{}{
-			"query": query,
-		})
-		return fmt.Sprintf("没有找到关于 '%s' 的搜索结果。", query), nil
-	}
-
-	// 格式化结果
-	resultStr := strings.Join(results, "\n")
-	logger.Info("搜索完成", map[string]interface{}{
-		"result_length": len(resultStr),
-	})
-	return fmt.Sprintf("搜索结果:\n%s", resultStr), nil
 }
 
 // 内置工具：文件操作

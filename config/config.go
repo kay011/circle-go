@@ -13,6 +13,13 @@ type Config struct {
 	LLM      LLMConfig      `yaml:"llm"`
 	Memory   MemoryConfig   `yaml:"memory"`
 	MCP      MCPConfig      `yaml:"mcp"`
+	Search   SearchConfig   `yaml:"search"`
+}
+
+// SearchConfig 搜索配置
+type SearchConfig struct {
+	BaiduAPIKey string `yaml:"baidu_api_key"`
+	BaiduAPIURL string `yaml:"baidu_api_url"`
 }
 
 // ServerConfig 服务器配置
@@ -80,6 +87,11 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Memory.LongTermPath == "" {
 		cfg.Memory.LongTermPath = "./memory"
+	}
+
+	// 设置搜索配置默认值
+	if cfg.Search.BaiduAPIURL == "" {
+		cfg.Search.BaiduAPIURL = "https://qianfan.baidubce.com/v2/ai_search/web_search"
 	}
 
 	return &cfg, nil

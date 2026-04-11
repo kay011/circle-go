@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -80,6 +81,48 @@ func (l *Logger) Fatal(message string, data ...map[string]interface{}) {
 		l.log(FATAL, message, data...)
 	}
 	os.Exit(1)
+}
+
+// Metrics 监控指标
+var (
+	metrics     = make(map[string]int64)
+	metricsMutex sync.RWMutex
+)
+
+// IncrMetric 增加指标计数
+func IncrMetric(name string) {
+	metricsMutex.Lock()
+	defer metricsMutex.Unlock()
+	metrics[name]++
+}
+
+// GetMetric 获取指标值
+func GetMetric(name string) int64 {
+	metricsMutex.RLock()
+	defer metricsMutex.RUnlock()
+	return metrics[name]
+}
+
+// GetAllMetrics 获取所有指标
+func GetAllMetrics() map[string]int64 {
+	metricsMutex.RLock()
+	defer metricsMutex.RUnlock()
+	result := make(map[string]int64)
+	for k, v := range metrics {
+		result[k] = v
+	}
+	return result
+}
+
+// LogMetrics 记录所有指标
+func LogMetrics(logger *Logger) {
+	metrics := GetAllMetrics()
+	// 转换为 map[string]interface{}
+	metricsInterface := make(map[string]interface{})
+	for k, v := range metrics {
+		metricsInterface[k] = v
+	}
+	logger.Info("系统指标", metricsInterface)
 }
 
 // log 记录日志

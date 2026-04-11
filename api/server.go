@@ -44,15 +44,19 @@ func NewServer(cfg *config.Config) *Server {
 	// 初始化工具管理器
 	toolManager := tools.NewToolManager()
 	toolManager.Register(tools.NewCalculatorTool())
-	toolManager.Register(tools.NewWebSearchTool())
+	toolManager.Register(tools.NewWebSearchTool(cfg.Search.BaiduAPIKey, cfg.Search.BaiduAPIURL))
 	toolManager.Register(tools.NewFileTool())
 
 	// 初始化记忆管理器
 	memoryManager := memory.NewMemoryManager(cfg.Memory.ShortTermSize, cfg.Memory.LongTermPath)
 
 	// 初始化Agent
-	agentInstance := agent.NewAgent(llmClient, toolManager, 5)
+	humanInTheLoop := true // 启用 human-in-the-loop
+	agentInstance := agent.NewAgent(llmClient, toolManager, 5, humanInTheLoop)
 	agentInstance.SetMemoryManager(memoryManager)
+	
+	// 设置 LLM 到记忆管理器
+	memoryManager.SetLLM(llmClient)
 
 	// 初始化MCP客户端
 	var mcpClient *mcp.MCPClient
@@ -85,6 +89,7 @@ func (s *Server) Start() error {
 	http.HandleFunc("/api/auth/login", s.handleLogin)
 	http.HandleFunc("/api/chat", s.handleChat)
 	http.HandleFunc("/api/chat/stream", s.handleChatStream)
+	http.HandleFunc("/api/chat/toolcall", s.handleToolCall)
 	http.HandleFunc("/api/sessions", s.handleSessions)
 	http.HandleFunc("/api/sessions/{id}", s.handleSession)
 
@@ -95,9 +100,9 @@ func (s *Server) Start() error {
 	s.server = &http.Server{
 		Addr:    fmt.Sprintf("%s:%s", s.config.Server.Host, s.config.Server.Port),
 		Handler: nil, // 使用默认的ServeMux
-		ReadTimeout:    15 * time.Second,
-		WriteTimeout:   15 * time.Second,
-		IdleTimeout:    60 * time.Second,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   60 * time.Second,
+		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
@@ -120,7 +125,12 @@ func (s *Server) Stop() error {
 
 // handleChat 处理聊天请求
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	// 增加请求计数
+	logging.IncrMetric("chat_requests_total")
+	startTime := time.Now()
+
 	if r.Method != http.MethodPost {
+		logging.IncrMetric("chat_requests_errors")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
@@ -136,6 +146,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logging.IncrMetric("chat_requests_errors")
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		s.logger.Error("Invalid request", map[string]interface{}{
 			"error": err.Error(),
@@ -146,6 +157,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Chat request received", map[string]interface{}{
 		"session_id": req.SessionID,
 		"message_length": len(req.Message),
+		"client_ip": r.RemoteAddr,
 	})
 
 	// 确保会话存在
@@ -154,13 +166,31 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 添加用户消息到记忆
 	s.memoryManager.AddMessage(req.SessionID, "user", req.Message)
 
+	// 压缩上下文
+	if err := s.memoryManager.CompressContext(r.Context(), req.SessionID); err != nil {
+		s.logger.Warn("Failed to compress context", map[string]interface{}{
+			"error": err.Error(),
+			"session_id": req.SessionID,
+		})
+	}
+
+	// 提取用户信息并更新用户画像
+	if err := s.memoryManager.ExtractUserInfo(r.Context(), req.SessionID); err != nil {
+		s.logger.Warn("Failed to extract user info", map[string]interface{}{
+			"error": err.Error(),
+			"session_id": req.SessionID,
+		})
+	}
+
 	// 运行Agent
 	response, err := s.agent.Run(r.Context(), req.SessionID, req.Message)
 	if err != nil {
+		logging.IncrMetric("chat_requests_errors")
 		http.Error(w, fmt.Sprintf("Failed to process message: %v", err), http.StatusInternalServerError)
 		s.logger.Error("Failed to process message", map[string]interface{}{
 			"error": err.Error(),
 			"session_id": req.SessionID,
+			"processing_time": time.Since(startTime).Milliseconds(),
 		})
 		return
 	}
@@ -174,15 +204,72 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		"response": response,
 	})
 
+	processingTime := time.Since(startTime).Milliseconds()
 	s.logger.Info("Chat request processed", map[string]interface{}{
 		"session_id": req.SessionID,
 		"response_length": len(response),
+		"processing_time": processingTime,
+	})
+
+	// 记录处理时间
+	if processingTime > 5000 {
+		logging.IncrMetric("chat_requests_slow")
+		s.logger.Warn("Slow chat request", map[string]interface{}{
+			"session_id": req.SessionID,
+			"processing_time": processingTime,
+		})
+	}
+}
+
+// handleToolCall 处理工具调用确认请求
+func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		s.logger.Warn("Method not allowed", map[string]interface{}{
+			"method": r.Method,
+			"path": r.URL.Path,
+		})
+		return
+	}
+
+	// 解析请求
+	var req struct {
+		SessionID   string `json:"session_id"`
+		ToolCallID  string `json:"tool_call_id"`
+		Approved    bool   `json:"approved"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		s.logger.Error("Invalid request", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	s.logger.Info("Tool call confirmation received", map[string]interface{}{
+		"session_id": req.SessionID,
+		"tool_call_id": req.ToolCallID,
+		"approved": req.Approved,
+	})
+
+	// 这里需要处理工具调用确认，实际实现需要根据 Agent 的设计来完成
+	// 目前返回成功响应
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "success",
+		"message": "Tool call processed",
 	})
 }
 
 // handleChatStream 处理流式聊天请求
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	// 增加请求计数
+	logging.IncrMetric("chat_stream_requests_total")
+	startTime := time.Now()
+
 	if r.Method != http.MethodPost {
+		logging.IncrMetric("chat_stream_requests_errors")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
@@ -198,6 +285,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logging.IncrMetric("chat_stream_requests_errors")
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		s.logger.Error("Invalid request", map[string]interface{}{
 			"error": err.Error(),
@@ -208,6 +296,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Stream chat request received", map[string]interface{}{
 		"session_id": req.SessionID,
 		"message_length": len(req.Message),
+		"client_ip": r.RemoteAddr,
 	})
 
 	// 确保会话存在
@@ -215,6 +304,22 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	// 添加用户消息到记忆
 	s.memoryManager.AddMessage(req.SessionID, "user", req.Message)
+
+	// 压缩上下文
+	if err := s.memoryManager.CompressContext(r.Context(), req.SessionID); err != nil {
+		s.logger.Warn("Failed to compress context", map[string]interface{}{
+			"error": err.Error(),
+			"session_id": req.SessionID,
+		})
+	}
+
+	// 提取用户信息并更新用户画像
+	if err := s.memoryManager.ExtractUserInfo(r.Context(), req.SessionID); err != nil {
+		s.logger.Warn("Failed to extract user info", map[string]interface{}{
+			"error": err.Error(),
+			"session_id": req.SessionID,
+		})
+	}
 
 	// 设置流式响应头
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -233,10 +338,12 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
+		logging.IncrMetric("chat_stream_requests_errors")
 		fmt.Fprintf(w, "data: Error: %v\n\n", err)
 		s.logger.Error("Stream chat error", map[string]interface{}{
 			"error": err.Error(),
 			"session_id": req.SessionID,
+			"processing_time": time.Since(startTime).Milliseconds(),
 		})
 	}
 
@@ -246,9 +353,20 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
+	processingTime := time.Since(startTime).Milliseconds()
 	s.logger.Info("Stream chat request processed", map[string]interface{}{
 		"session_id": req.SessionID,
+		"processing_time": processingTime,
 	})
+
+	// 记录处理时间
+	if processingTime > 5000 {
+		logging.IncrMetric("chat_stream_requests_slow")
+		s.logger.Warn("Slow stream chat request", map[string]interface{}{
+			"session_id": req.SessionID,
+			"processing_time": processingTime,
+		})
+	}
 }
 
 // handleSessions 处理会话列表请求

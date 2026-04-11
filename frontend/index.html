@@ -42,14 +42,15 @@
 
         .container {
             width: 100%;
-            max-width: 800px;
-            height: 90vh;
+            max-width: 414px; /* iPhone 11 Pro Max 宽度 */
+            height: 100vh;
             background-color: var(--card-background);
-            border-radius: var(--border-radius);
+            border-radius: 0;
             box-shadow: var(--shadow);
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            margin: 0 auto;
         }
 
         .header {
@@ -156,9 +157,46 @@
             padding: 20px;
             overflow-y: auto;
             display: flex;
-            flex-direction: column;
+            flex-direction: column-reverse;
             gap: 15px;
             background-color: #fafafa;
+            scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .chat-messages::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .chat-messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 10px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb:hover {
+            background: #a1a1a1;
+        }
+
+        /* 加载更多指示器 */
+        .loading-indicator {
+            display: flex;
+            justify-content: center;
+            padding: 15px;
+            margin: 10px 0;
+        }
+
+        .loading-indicator .spinner {
+            width: 24px;
+            height: 24px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
         }
 
         .message {
@@ -344,6 +382,16 @@
             outline: none;
             border-color: var(--primary-color);
             box-shadow: 0 0 0 2px rgba(67, 97, 238, 0.1);
+        }
+
+        .form-control {
+            padding: 12px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 16px;
+            background-color: #f8f9fa;
+            min-height: 60px;
+            white-space: pre-wrap;
         }
 
         .form-actions {
@@ -544,15 +592,63 @@
         </div>
     </div>
 
+    <!-- 工具调用确认模态框 -->
+    <div id="toolCallModal" class="modal">
+        <div class="modal-content">
+            <h3><i class="fas fa-tools"></i> 工具调用确认</h3>
+            <div class="form-group">
+                <label>工具名称</label>
+                <div id="toolName" class="form-control">工具名称</div>
+            </div>
+            <div class="form-group">
+                <label>调用原因</label>
+                <div id="toolReasoning" class="form-control">调用原因</div>
+            </div>
+            <div class="form-group">
+                <label>参数</label>
+                <div id="toolArguments" class="form-control">参数</div>
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-secondary" onclick="rejectToolCall()">拒绝</button>
+                <button class="btn btn-primary" onclick="approveToolCall()">同意</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let currentSessionId = generateSessionId();
         let isStreaming = false;
         let token = localStorage.getItem('token');
         let username = localStorage.getItem('username');
+        let currentToolCall = null;
 
         // 生成会话ID
         function generateSessionId() {
             return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        }
+
+        // 滚动到最新消息
+        function scrollToBottom() {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // 加载更多历史消息
+        function loadMoreMessages() {
+            // 这里可以实现加载历史消息的逻辑
+            // 例如，从服务器获取更多历史消息并添加到聊天消息区域
+            console.log('加载更多历史消息');
+        }
+
+        // 初始化滚动事件监听器
+        function initScrollListener() {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.addEventListener('scroll', function() {
+                // 当滚动到顶部时，加载更多历史消息
+                if (chatMessages.scrollTop === 0) {
+                    loadMoreMessages();
+                }
+            });
         }
 
         // 显示通知
@@ -699,6 +795,89 @@
             showNotification('已创建新会话', 'info');
         }
 
+        // 显示工具调用确认模态框
+        function showToolCallModal(toolCall) {
+            currentToolCall = toolCall;
+            document.getElementById('toolName').textContent = toolCall.name;
+            document.getElementById('toolReasoning').textContent = toolCall.reasoning;
+            document.getElementById('toolArguments').textContent = JSON.stringify(toolCall.arguments, null, 2);
+            document.getElementById('toolCallModal').style.display = 'flex';
+        }
+
+        // 同意工具调用
+        function approveToolCall() {
+            if (currentToolCall) {
+                // 发送工具调用确认请求
+                fetch('/api/chat/toolcall', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        tool_call_id: currentToolCall.id,
+                        approved: true
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showNotification('工具调用已批准', 'success');
+                    } else {
+                        showNotification('工具调用批准失败: ' + data.message, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('批准工具调用错误:', error);
+                    showNotification('批准工具调用失败: 网络错误', 'error');
+                });
+                
+                document.getElementById('toolCallModal').style.display = 'none';
+                currentToolCall = null;
+                
+                // 启用发送按钮
+                const sendButton = document.querySelector('.chat-input button');
+                sendButton.disabled = false;
+            }
+        }
+
+        // 拒绝工具调用
+        function rejectToolCall() {
+            if (currentToolCall) {
+                // 发送工具调用拒绝请求
+                fetch('/api/chat/toolcall', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        tool_call_id: currentToolCall.id,
+                        approved: false
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showNotification('工具调用已拒绝', 'info');
+                    } else {
+                        showNotification('工具调用拒绝失败: ' + data.message, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('拒绝工具调用错误:', error);
+                    showNotification('拒绝工具调用失败: 网络错误', 'error');
+                });
+                
+                document.getElementById('toolCallModal').style.display = 'none';
+                currentToolCall = null;
+                
+                // 启用发送按钮
+                const sendButton = document.querySelector('.chat-input button');
+                sendButton.disabled = false;
+            }
+        }
+
         // 发送消息
         function sendMessage() {
             const messageInput = document.getElementById('messageInput');
@@ -750,32 +929,35 @@
                         }
 
                         const chunk = decoder.decode(value, { stream: true });
-                        const lines = chunk.split('\n');
+                        console.log('接收到的数据:', chunk);
+                        
+                        // 累积消息
+                        aiMessage += chunk;
 
-                        for (const line of lines) {
-                            if (line.startsWith('data: ')) {
-                                const data = line.substring(6).trim();
-                                
-                                if (data === '[DONE]') {
-                                    // 流式结束
-                                    loadingElement.remove();
-                                    // 启用发送按钮
-                                    sendButton.disabled = false;
-                                    return;
+                        // 检查是否是工具调用请求
+                        if (aiMessage.includes('tool_call')) {
+                            try {
+                                const toolCallData = JSON.parse(aiMessage);
+                                if (toolCallData.tool_call) {
+                                    // 显示工具调用确认模态框
+                                    showToolCallModal(toolCallData.tool_call);
+                                    // 不添加到消息列表
+                                    aiMessage = ''; // 清空累积的消息
                                 }
-
-                                // 检查是否是工具消息
-                                if (data.startsWith('正在使用 ')) {
-                                    // 添加工具消息
-                                    addMessage('tool', data);
-                                } else {
-                                    // 更新AI消息
-                                    if (!messageElement) {
-                                        messageElement = addMessage('ai', '');
-                                    }
-                                    messageElement.querySelector('.message-content').textContent += data;
-                                }
+                            } catch (error) {
+                                // JSON解析失败，继续累积数据
+                                console.log('等待完整JSON数据...');
                             }
+                        } else if (aiMessage.startsWith('正在使用 ')) {
+                            // 添加工具消息
+                            addMessage('tool', aiMessage);
+                            aiMessage = ''; // 清空累积的消息
+                        } else {
+                            // 更新AI消息
+                            if (!messageElement) {
+                                messageElement = addMessage('ai', '');
+                            }
+                            messageElement.querySelector('.message-content').textContent = aiMessage;
                         }
 
                         processStream();
@@ -816,7 +998,10 @@
             messageDiv.appendChild(messageContent);
             messageDiv.appendChild(messageTime);
             chatMessages.appendChild(messageDiv);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            // 滚动到底部
+            scrollToBottom();
+            
             return messageDiv;
         }
 
@@ -880,6 +1065,7 @@
         window.onload = function() {
             checkAuth();
             loadSessions();
+            initScrollListener();
             showNotification('欢迎使用 AI Agent Chat', 'info');
         };
     </script>

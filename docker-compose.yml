@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  circle-go:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./memory:/app/memory
+      - ./config:/app/config
+    environment:
+      - CONFIG_PATH=/app/config/config.yaml
+    restart: unless-stopped

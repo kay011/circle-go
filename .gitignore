@@ -1,0 +1,28 @@
+# Binary files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+build/
+bin/
+
+# Configuration files
+config/config.yaml
+
+# Memory directory
+memory/
+
+# Log files
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test files
+coverage.out

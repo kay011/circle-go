@@ -1,6 +1,9 @@
 # 使用官方Go镜像作为构建环境
 FROM golang:1.21-alpine AS builder
 
+# 与本地/Makefile 一致，避免部分网络环境下 go mod 失败
+ENV GOPROXY=https://goproxy.io,https://proxy.golang.org,direct
+
 # 设置工作目录
 WORKDIR /app
 

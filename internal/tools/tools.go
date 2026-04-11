@@ -2,13 +2,19 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"circle-go/internal/logging"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 // Tool 工具接口
@@ -300,17 +306,28 @@ func isDigitOrDot(c byte) bool {
 	return (c >= '0' && c <= '9') || c == '.'
 }
 
-// 内置工具：网络搜索
-func NewWebSearchTool(baiduAPIKey, baiduAPIURL string) Tool {
-	return &webSearchTool{
-		baiduAPIKey: baiduAPIKey,
-		baiduAPIURL: baiduAPIURL,
+// 内置工具：网络搜索（DuckDuckGo HTML/Lite + SearxNG 聚合，均无 API Key）
+// searxInstances 为 SearxNG 根 URL 列表（如 https://searx.be）；为空时使用内置公共实例（可能随时间失效，建议在 config 中自行维护）。
+func NewWebSearchTool(searxInstances []string) Tool {
+	bases := searxInstances
+	if len(bases) == 0 {
+		bases = defaultSearxBases()
 	}
+	return &webSearchTool{searxBases: bases}
 }
 
 type webSearchTool struct {
-	baiduAPIKey string
-	baiduAPIURL string
+	searxBases []string
+}
+
+// defaultSearxBases 公共 SearxNG 实例（零 Key）；实例可用性变化快，生产环境请在 config.search.searx_instances 中覆盖。
+func defaultSearxBases() []string {
+	return []string{
+		"https://searx.tiekoetter.com",
+		"https://searx.be",
+		"https://paulgo.io",
+		"https://search.mdosch.de",
+	}
 }
 
 func (t *webSearchTool) Name() string {
@@ -318,18 +335,14 @@ func (t *webSearchTool) Name() string {
 }
 
 func (t *webSearchTool) Description() string {
-	return "搜索网络信息"
+	return "当用户需要查询实时信息、新闻、天气或事实性知识时使用此工具。"
 }
 
 func (t *webSearchTool) Parameters() map[string]Property {
 	return map[string]Property{
 		"query": {
 			Type:        "string",
-			Description: "搜索查询词",
-		},
-		"num_results": {
-			Type:        "integer",
-			Description: "返回结果数量，默认为3",
+			Description: "搜索关键词",
 		},
 	}
 }
@@ -338,124 +351,317 @@ func (t *webSearchTool) Required() []string {
 	return []string{"query"}
 }
 
-// 百度搜索 API 请求结构
-type baiduRequest struct {
-	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"messages"`
-	Edition            string `json:"edition,omitempty"`
-	SearchSource       string `json:"search_source,omitempty"`
-	ResourceTypeFilter []struct {
-		Type string `json:"type"`
-		TopK int    `json:"top_k"`
-	} `json:"resource_type_filter,omitempty"`
-}
-
-// 百度搜索 API 响应结构
-type baiduResponse struct {
-	Result struct {
-		Items []struct {
-			Title    string `json:"title"`
-			Url      string `json:"url"`
-			Abstract string `json:"abstract"`
-			PageTime string `json:"page_time,omitempty"`
-		} `json:"items"`
-	} `json:"result"`
-	Error struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-}
-
 func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (string, error) {
-	// 初始化日志记录器
 	logger := logging.NewLogger(logging.INFO, "WebSearchTool")
 
-	query, ok := args["query"].(string)
-	if !ok {
-		logger.Error("无效的查询类型", map[string]interface{}{
-			"args": args,
-		})
-		return "", fmt.Errorf("invalid query type")
+	query := strings.TrimSpace(fmt.Sprint(args["query"]))
+	if query == "" {
+		return "", fmt.Errorf("missing or empty query")
 	}
 
-	numResults := 3
-	if numResultsVal, exists := args["num_results"]; exists {
-		if nr, ok := numResultsVal.(float64); ok {
-			numResults = int(nr)
+	logger.Info("开始网络搜索", map[string]interface{}{"query": query})
+
+	client := &http.Client{Timeout: 25 * time.Second}
+
+	var results []searchHit
+
+	r1, err := duckduckgoHTMLSearch(ctx, client, query)
+	if err != nil {
+		logger.Warn("DuckDuckGo HTML 搜索失败", map[string]interface{}{"error": err.Error()})
+	} else {
+		results = r1
+	}
+	if len(results) == 0 {
+		r2, err2 := duckduckgoLiteSearch(ctx, client, query)
+		if err2 != nil {
+			logger.Warn("DuckDuckGo Lite 搜索失败", map[string]interface{}{"error": err2.Error()})
+		} else {
+			results = r2
 		}
 	}
+	if len(results) == 0 {
+		r3 := searxSearchAggregated(ctx, client, query, t.searxBases, logger)
+		results = r3
+	}
 
-	logger.Info("开始搜索", map[string]interface{}{
-		"query":       query,
-		"num_results": numResults,
-	})
+	if len(results) == 0 {
+		return fmt.Sprintf("未找到与 \"%s\" 相关的网页摘要（可能被目标站反爬或暂时无结果）。可换个关键词重试。", query), nil
+	}
 
-	// 总是使用本地模拟数据
-	logger.Info("使用本地模拟数据进行搜索", map[string]interface{}{
-		"query": query,
-	})
-	return t.getMockSearchResults(query, numResults, logger), nil
+	const max = 5
+	if len(results) > max {
+		results = results[:max]
+	}
+	var lines []string
+	for _, r := range results {
+		lines = append(lines, fmt.Sprintf("- **%s**: %s\n  [链接](%s)", r.title, r.snippet, r.link))
+	}
+	return fmt.Sprintf("关于 \"%s\" 的搜索结果:\n\n%s", query, strings.Join(lines, "\n\n")), nil
 }
 
-// 获取模拟搜索结果
-func (t *webSearchTool) getMockSearchResults(query string, numResults int, logger *logging.Logger) string {
-	// 转换查询词为小写，方便匹配
-	lowerQuery := strings.ToLower(query)
+type searchHit struct {
+	title, link, snippet string
+}
 
-	// 匹配常见查询
-	if strings.Contains(lowerQuery, "go语言") || strings.Contains(lowerQuery, "golang") {
-		// Go 语言相关搜索结果
-		return `搜索结果:
-摘要: Go 是一种开源的编程语言，它能让构造简单、可靠且高效的软件变得容易。
-来源: https://golang.org/
+func setBrowserHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+}
 
-结果 1: Go 语言的最新稳定版本是 Go 1.22，于 2024 年 2 月发布。
-链接: https://golang.org/doc/devel/release.html
-
-结果 2: Go 语言由 Google 开发，于 2009 年首次发布。
-链接: https://golang.org/doc/faq#history
-
-结果 3: Go 语言的主要特点包括：静态类型、垃圾回收、并发支持、简洁的语法等。
-链接: https://golang.org/doc/effective_go.html`
-	} else if strings.Contains(lowerQuery, "docker") {
-		// Docker 相关搜索结果
-		return `搜索结果:
-摘要: Docker 是一个开源的容器化平台，用于构建、部署和运行应用程序。
-来源: https://www.docker.com/
-
-结果 1: Docker 允许开发者将应用程序及其依赖项打包到一个轻量级、可移植的容器中。
-链接: https://www.docker.com/what-docker
-
-结果 2: Docker 的最新稳定版本是 Docker Desktop 4.26，于 2024 年 1 月发布。
-链接: https://docs.docker.com/desktop/release-notes/
-
-结果 3: Docker 容器是轻量级的，因为它们共享主机的操作系统内核，而不需要运行完整的操作系统。
-链接: https://www.docker.com/resources/what-container`
-	} else if strings.Contains(lowerQuery, "人工智能") || strings.Contains(lowerQuery, "ai") {
-		// 人工智能相关搜索结果
-		return `搜索结果:
-摘要: 人工智能（AI）是计算机科学的一个分支，旨在创建能够模拟人类智能的系统。
-来源: https://en.wikipedia.org/wiki/Artificial_intelligence
-
-结果 1: 人工智能的主要领域包括机器学习、深度学习、自然语言处理、计算机视觉等。
-链接: https://www.ibm.com/topics/artificial-intelligence
-
-结果 2: 2024 年，人工智能技术继续快速发展，特别是在大语言模型和生成式 AI 领域。
-链接: https://www.gartner.com/en/newsroom/press-releases/2024-01-16-gartner-top-strategic-technology-trends-for-2024-include-ai-security-and-industry-cloud-platforms
-
-结果 3: 人工智能在医疗、金融、交通、教育等领域都有广泛的应用。
-链接: https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/ai-by-industry`
-	} else {
-		// 通用搜索结果
-		results := fmt.Sprintf("搜索结果:\n摘要: 关于 '%s' 的搜索结果。\n\n", query)
-		for i := 1; i <= numResults; i++ {
-			results += fmt.Sprintf("结果 %d: 这是关于 '%s' 的搜索结果 %d。\n", i, query, i)
-			results += fmt.Sprintf("链接: https://example.com/search?q=%s&result=%d\n\n", url.QueryEscape(query), i)
-		}
-		return results
+func duckduckgoHTMLSearch(ctx context.Context, client *http.Client, query string) ([]searchHit, error) {
+	u := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
 	}
+	setBrowserHeaders(req)
+	req.Header.Set("Referer", "https://html.duckduckgo.com/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []searchHit
+	doc.Find(".result").Each(func(i int, s *goquery.Selection) {
+		if len(out) >= 8 {
+			return
+		}
+		if s.HasClass("result--ad") {
+			return
+		}
+		a := s.Find("a.result__a").First()
+		title := strings.TrimSpace(a.Text())
+		link, _ := a.Attr("href")
+		snippet := strings.TrimSpace(s.Find("a.result__snippet").Text())
+		if snippet == "" {
+			snippet = strings.TrimSpace(s.Find(".result__snippet").Text())
+		}
+		if title != "" && link != "" {
+			out = append(out, searchHit{title: title, link: link, snippet: snippet})
+		}
+	})
+	return out, nil
+}
+
+func duckduckgoLiteSearch(ctx context.Context, client *http.Client, query string) ([]searchHit, error) {
+	u := "https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(query)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	setBrowserHeaders(req)
+	req.Header.Set("Referer", "https://lite.duckduckgo.com/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("lite status %d: %s", resp.StatusCode, string(b))
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []searchHit
+	doc.Find("tr.result").Each(func(i int, s *goquery.Selection) {
+		if len(out) >= 8 {
+			return
+		}
+		title := strings.TrimSpace(s.Find("a.result-link").Text())
+		link, _ := s.Find("a.result-link").Attr("href")
+		snippet := strings.TrimSpace(s.Find("td.result-snippet").Text())
+		if title != "" && link != "" {
+			out = append(out, searchHit{title: title, link: link, snippet: snippet})
+		}
+	})
+	return out, nil
+}
+
+// searxSearchAggregated 依次尝试多个 SearxNG 实例：优先 format=json，无结果或失败再解析 HTML。
+func searxSearchAggregated(ctx context.Context, client *http.Client, query string, bases []string, logger *logging.Logger) []searchHit {
+	for _, raw := range bases {
+		base := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if base == "" {
+			continue
+		}
+		subCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		hits, err := searxSearchJSON(subCtx, client, base, query)
+		cancel()
+		if err != nil || len(hits) == 0 {
+			if err != nil {
+				logger.Warn("Searx JSON 不可用，尝试 HTML", map[string]interface{}{"base": base, "error": err.Error()})
+			}
+			subCtx2, cancel2 := context.WithTimeout(ctx, 12*time.Second)
+			h2, err2 := searxSearchHTML(subCtx2, client, base, query)
+			cancel2()
+			if err2 != nil {
+				logger.Warn("Searx HTML 失败", map[string]interface{}{"base": base, "error": err2.Error()})
+				continue
+			}
+			hits = h2
+		}
+		if len(hits) > 0 {
+			logger.Info("SearxNG 搜索成功", map[string]interface{}{"base": base, "count": len(hits)})
+			return hits
+		}
+	}
+	return nil
+}
+
+func normalizeSearxURL(base, link string) string {
+	link = strings.TrimSpace(link)
+	if link == "" {
+		return ""
+	}
+	if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
+		return link
+	}
+	if strings.HasPrefix(link, "//") {
+		return "https:" + link
+	}
+	if strings.HasPrefix(link, "/") {
+		return base + link
+	}
+	return link
+}
+
+func searxSearchJSON(ctx context.Context, client *http.Client, base, query string) ([]searchHit, error) {
+	u := base + "/search?q=" + url.QueryEscape(query) + "&format=json&language=auto"
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	setBrowserHeaders(req)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Referer", base+"/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	var payload struct {
+		Results []struct {
+			URL     string `json:"url"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+		} `json:"results"`
+	}
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 3<<20))
+	if err := dec.Decode(&payload); err != nil {
+		return nil, err
+	}
+
+	var out []searchHit
+	for _, r := range payload.Results {
+		if len(out) >= 10 {
+			break
+		}
+		title := strings.TrimSpace(r.Title)
+		link := normalizeSearxURL(base, strings.TrimSpace(r.URL))
+		if title == "" || link == "" {
+			continue
+		}
+		out = append(out, searchHit{
+			title:   title,
+			link:    link,
+			snippet: strings.TrimSpace(r.Content),
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty json results")
+	}
+	return out, nil
+}
+
+func searxSearchHTML(ctx context.Context, client *http.Client, base, query string) ([]searchHit, error) {
+	u := base + "/search?q=" + url.QueryEscape(query) + "&language=auto"
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	setBrowserHeaders(req)
+	req.Header.Set("Referer", base+"/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []searchHit
+	// 常见主题：article.result（SearxNG）、div.result
+	doc.Find("article.result").Each(func(i int, s *goquery.Selection) {
+		if len(out) >= 10 {
+			return
+		}
+		a := s.Find("h3 a, h4 a, .result_header a").First()
+		if a.Length() == 0 {
+			a = s.Find("a").First()
+		}
+		title := strings.TrimSpace(a.Text())
+		href, _ := a.Attr("href")
+		link := normalizeSearxURL(base, href)
+		snippet := strings.TrimSpace(s.Find("p.content, .content").First().Text())
+		if title != "" && link != "" {
+			out = append(out, searchHit{title: title, link: link, snippet: snippet})
+		}
+	})
+	if len(out) > 0 {
+		return out, nil
+	}
+
+	doc.Find("div.result").Each(func(i int, s *goquery.Selection) {
+		if len(out) >= 10 {
+			return
+		}
+		if s.HasClass("result--ad") {
+			return
+		}
+		a := s.Find(".result_header a, h3 a, h4 a").First()
+		title := strings.TrimSpace(a.Text())
+		href, _ := a.Attr("href")
+		link := normalizeSearxURL(base, href)
+		snippet := strings.TrimSpace(s.Find(".content").First().Text())
+		if title != "" && link != "" {
+			out = append(out, searchHit{title: title, link: link, snippet: snippet})
+		}
+	})
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty html results")
+	}
+	return out, nil
 }
 
 // 内置工具：文件操作

@@ -21,6 +21,13 @@ mcp:
   enabled: false
   url: "http://localhost:8000"
 
+# 搜索（web_search 工具：零 API Key，DuckDuckGo + SearxNG 聚合）
+# 若留空则使用内置公共 Searx 实例列表；建议自行维护可用实例根 URL（HTTPS，无末尾斜杠也可）
+search:
+  searx_instances:
+    - "https://searx.tiekoetter.com"
+    - "https://searx.be"
+
 # Usage:
 # 1. Copy this file to config.yaml
 # 2. Replace "your-openai-api-key" with your actual OpenAI API key

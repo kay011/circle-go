@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"circle-go/config"
@@ -12,22 +13,34 @@ import (
 	"circle-go/internal/auth"
 	"circle-go/internal/llm"
 	"circle-go/internal/logging"
-	"circle-go/internal/memory"
 	"circle-go/internal/mcp"
+	"circle-go/internal/memory"
 	"circle-go/internal/tools"
 )
 
+// writeSSEData 按 SSE 规范写入文本：拆成多行 data:，由浏览器拼成完整 payload，避免单行 data 内含换行导致前端只收到首行。
+func writeSSEData(w http.ResponseWriter, text string) {
+	norm := strings.ReplaceAll(text, "\r\n", "\n")
+	for _, line := range strings.Split(norm, "\n") {
+		fmt.Fprintf(w, "data: %s\n", line)
+	}
+	fmt.Fprintf(w, "\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // Server API服务器
 type Server struct {
-	config       *config.Config
-	llm          llm.LLM
-	toolManager  *tools.ToolManager
+	config        *config.Config
+	llm           llm.LLM
+	toolManager   *tools.ToolManager
 	memoryManager *memory.MemoryManager
-	authManager  *auth.AuthManager
-	logger       *logging.Logger
-	agent        *agent.Agent
-	mcpClient    *mcp.MCPClient
-	server       *http.Server
+	authManager   *auth.AuthManager
+	logger        *logging.Logger
+	agent         *agent.Agent
+	mcpClient     *mcp.MCPClient
+	server        *http.Server
 }
 
 // NewServer 创建API服务器
@@ -44,7 +57,7 @@ func NewServer(cfg *config.Config) *Server {
 	// 初始化工具管理器
 	toolManager := tools.NewToolManager()
 	toolManager.Register(tools.NewCalculatorTool())
-	toolManager.Register(tools.NewWebSearchTool(cfg.Search.BaiduAPIKey, cfg.Search.BaiduAPIURL))
+	toolManager.Register(tools.NewWebSearchTool(cfg.Search.SearxInstances))
 	toolManager.Register(tools.NewFileTool())
 
 	// 初始化记忆管理器
@@ -54,7 +67,7 @@ func NewServer(cfg *config.Config) *Server {
 	humanInTheLoop := true // 启用 human-in-the-loop
 	agentInstance := agent.NewAgent(llmClient, toolManager, 5, humanInTheLoop)
 	agentInstance.SetMemoryManager(memoryManager)
-	
+
 	// 设置 LLM 到记忆管理器
 	memoryManager.SetLLM(llmClient)
 
@@ -71,14 +84,14 @@ func NewServer(cfg *config.Config) *Server {
 	logger := logging.NewLogger(logging.INFO, "API")
 
 	return &Server{
-		config:       cfg,
-		llm:          llmClient,
-		toolManager:  toolManager,
+		config:        cfg,
+		llm:           llmClient,
+		toolManager:   toolManager,
 		memoryManager: memoryManager,
-		authManager:  authManager,
-		logger:       logger,
-		agent:        agentInstance,
-		mcpClient:    mcpClient,
+		authManager:   authManager,
+		logger:        logger,
+		agent:         agentInstance,
+		mcpClient:     mcpClient,
 	}
 }
 
@@ -98,8 +111,8 @@ func (s *Server) Start() error {
 
 	// 创建服务器
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%s", s.config.Server.Host, s.config.Server.Port),
-		Handler: nil, // 使用默认的ServeMux
+		Addr:           fmt.Sprintf("%s:%s", s.config.Server.Host, s.config.Server.Port),
+		Handler:        nil, // 使用默认的ServeMux
 		ReadTimeout:    30 * time.Second,
 		WriteTimeout:   60 * time.Second,
 		IdleTimeout:    120 * time.Second,
@@ -134,7 +147,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
-			"path": r.URL.Path,
+			"path":   r.URL.Path,
 		})
 		return
 	}
@@ -155,9 +168,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("Chat request received", map[string]interface{}{
-		"session_id": req.SessionID,
+		"session_id":     req.SessionID,
 		"message_length": len(req.Message),
-		"client_ip": r.RemoteAddr,
+		"client_ip":      r.RemoteAddr,
 	})
 
 	// 确保会话存在
@@ -169,7 +182,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 压缩上下文
 	if err := s.memoryManager.CompressContext(r.Context(), req.SessionID); err != nil {
 		s.logger.Warn("Failed to compress context", map[string]interface{}{
-			"error": err.Error(),
+			"error":      err.Error(),
 			"session_id": req.SessionID,
 		})
 	}
@@ -177,7 +190,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 提取用户信息并更新用户画像
 	if err := s.memoryManager.ExtractUserInfo(r.Context(), req.SessionID); err != nil {
 		s.logger.Warn("Failed to extract user info", map[string]interface{}{
-			"error": err.Error(),
+			"error":      err.Error(),
 			"session_id": req.SessionID,
 		})
 	}
@@ -188,8 +201,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		logging.IncrMetric("chat_requests_errors")
 		http.Error(w, fmt.Sprintf("Failed to process message: %v", err), http.StatusInternalServerError)
 		s.logger.Error("Failed to process message", map[string]interface{}{
-			"error": err.Error(),
-			"session_id": req.SessionID,
+			"error":           err.Error(),
+			"session_id":      req.SessionID,
 			"processing_time": time.Since(startTime).Milliseconds(),
 		})
 		return
@@ -206,7 +219,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	processingTime := time.Since(startTime).Milliseconds()
 	s.logger.Info("Chat request processed", map[string]interface{}{
-		"session_id": req.SessionID,
+		"session_id":      req.SessionID,
 		"response_length": len(response),
 		"processing_time": processingTime,
 	})
@@ -215,7 +228,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if processingTime > 5000 {
 		logging.IncrMetric("chat_requests_slow")
 		s.logger.Warn("Slow chat request", map[string]interface{}{
-			"session_id": req.SessionID,
+			"session_id":      req.SessionID,
 			"processing_time": processingTime,
 		})
 	}
@@ -227,16 +240,16 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
-			"path": r.URL.Path,
+			"path":   r.URL.Path,
 		})
 		return
 	}
 
 	// 解析请求
 	var req struct {
-		SessionID   string `json:"session_id"`
-		ToolCallID  string `json:"tool_call_id"`
-		Approved    bool   `json:"approved"`
+		SessionID  string `json:"session_id"`
+		ToolCallID string `json:"tool_call_id"`
+		Approved   bool   `json:"approved"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -248,16 +261,16 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("Tool call confirmation received", map[string]interface{}{
-		"session_id": req.SessionID,
+		"session_id":   req.SessionID,
 		"tool_call_id": req.ToolCallID,
-		"approved": req.Approved,
+		"approved":     req.Approved,
 	})
 
 	// 这里需要处理工具调用确认，实际实现需要根据 Agent 的设计来完成
 	// 目前返回成功响应
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status": "success",
+		"status":  "success",
 		"message": "Tool call processed",
 	})
 }
@@ -273,7 +286,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
-			"path": r.URL.Path,
+			"path":   r.URL.Path,
 		})
 		return
 	}
@@ -294,9 +307,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("Stream chat request received", map[string]interface{}{
-		"session_id": req.SessionID,
+		"session_id":     req.SessionID,
 		"message_length": len(req.Message),
-		"client_ip": r.RemoteAddr,
+		"client_ip":      r.RemoteAddr,
 	})
 
 	// 确保会话存在
@@ -308,7 +321,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// 压缩上下文
 	if err := s.memoryManager.CompressContext(r.Context(), req.SessionID); err != nil {
 		s.logger.Warn("Failed to compress context", map[string]interface{}{
-			"error": err.Error(),
+			"error":      err.Error(),
 			"session_id": req.SessionID,
 		})
 	}
@@ -316,7 +329,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// 提取用户信息并更新用户画像
 	if err := s.memoryManager.ExtractUserInfo(r.Context(), req.SessionID); err != nil {
 		s.logger.Warn("Failed to extract user info", map[string]interface{}{
-			"error": err.Error(),
+			"error":      err.Error(),
 			"session_id": req.SessionID,
 		})
 	}
@@ -327,35 +340,29 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	// 运行Agent流式
-	err := s.agent.RunStream(r.Context(), req.SessionID, req.Message, func(chunk string) error {
-		// 发送流式数据
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		// 刷新响应
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
+	finalReply, runErr := s.agent.RunStream(r.Context(), req.SessionID, req.Message, func(chunk string) error {
+		writeSSEData(w, chunk)
 		return nil
 	})
 
-	if err != nil {
+	if runErr != nil {
 		logging.IncrMetric("chat_stream_requests_errors")
-		fmt.Fprintf(w, "data: Error: %v\n\n", err)
+		writeSSEData(w, fmt.Sprintf("Error: %v", runErr))
 		s.logger.Error("Stream chat error", map[string]interface{}{
-			"error": err.Error(),
-			"session_id": req.SessionID,
+			"error":           runErr.Error(),
+			"session_id":      req.SessionID,
 			"processing_time": time.Since(startTime).Milliseconds(),
 		})
+	} else if finalReply != "" {
+		s.memoryManager.AddMessage(req.SessionID, "assistant", finalReply)
 	}
 
 	// 发送结束信号
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	writeSSEData(w, "[DONE]")
 
 	processingTime := time.Since(startTime).Milliseconds()
 	s.logger.Info("Stream chat request processed", map[string]interface{}{
-		"session_id": req.SessionID,
+		"session_id":      req.SessionID,
 		"processing_time": processingTime,
 	})
 
@@ -363,7 +370,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	if processingTime > 5000 {
 		logging.IncrMetric("chat_stream_requests_slow")
 		s.logger.Warn("Slow stream chat request", map[string]interface{}{
-			"session_id": req.SessionID,
+			"session_id":      req.SessionID,
 			"processing_time": processingTime,
 		})
 	}
@@ -371,6 +378,10 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 // handleSessions 处理会话列表请求
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	sessions := s.memoryManager.ListSessions()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -381,6 +392,10 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleSession 处理单个会话请求
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	sessionID := r.URL.Path[len("/api/sessions/"):]
 
 	session := s.memoryManager.GetSession(sessionID)
@@ -466,7 +481,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// 返回成功响应
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"token": token,
+		"token":   token,
 		"message": "Login successful",
 	})
 }

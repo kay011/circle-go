@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"circle-go/config"
@@ -41,6 +42,9 @@ type Server struct {
 	agent         *agent.Agent
 	mcpClient     *mcp.MCPClient
 	server        *http.Server
+
+	sessionMu     sync.RWMutex
+	sessionTokens map[string]string // token -> username，用于 /me 与登出
 }
 
 // NewServer 创建API服务器
@@ -57,7 +61,10 @@ func NewServer(cfg *config.Config) *Server {
 	// 初始化工具管理器
 	toolManager := tools.NewToolManager()
 	toolManager.Register(tools.NewCalculatorTool())
-	toolManager.Register(tools.NewWebSearchTool(cfg.Search.SearxInstances))
+	toolManager.Register(tools.NewWebSearchTool(tools.WebSearchToolConfig{
+		SearxInstances: cfg.Search.SearxInstances,
+		Mock:           cfg.Search.WebSearchMock,
+	}))
 	toolManager.Register(tools.NewFileTool())
 
 	// 初始化记忆管理器
@@ -92,6 +99,7 @@ func NewServer(cfg *config.Config) *Server {
 		logger:        logger,
 		agent:         agentInstance,
 		mcpClient:     mcpClient,
+		sessionTokens: make(map[string]string),
 	}
 }
 
@@ -100,6 +108,8 @@ func (s *Server) Start() error {
 	// 注册路由
 	http.HandleFunc("/api/auth/register", s.handleRegister)
 	http.HandleFunc("/api/auth/login", s.handleLogin)
+	http.HandleFunc("/api/auth/me", s.handleAuthMe)
+	http.HandleFunc("/api/auth/logout", s.handleLogout)
 	http.HandleFunc("/api/chat", s.handleChat)
 	http.HandleFunc("/api/chat/stream", s.handleChatStream)
 	http.HandleFunc("/api/chat/toolcall", s.handleToolCall)
@@ -478,10 +488,63 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 返回成功响应
+	s.sessionMu.Lock()
+	s.sessionTokens[token] = req.Username
+	s.sessionMu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"token":   token,
-		"message": "Login successful",
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":    token,
+		"username": req.Username,
+		"message":  "Login successful",
 	})
+}
+
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	const p = "Bearer "
+	if len(h) > len(p) && strings.EqualFold(h[:len(p)], p) {
+		return strings.TrimSpace(h[len(p):])
+	}
+	return ""
+}
+
+// handleAuthMe GET /api/auth/me — 校验 token，返回当前用户名
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tok := bearerToken(r)
+	if tok == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	s.sessionMu.RLock()
+	u, ok := s.sessionTokens[tok]
+	s.sessionMu.RUnlock()
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"username": u})
+}
+
+// handleLogout POST /api/auth/logout — 使 token 失效
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tok := bearerToken(r)
+	if tok == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	s.sessionMu.Lock()
+	delete(s.sessionTokens, tok)
+	s.sessionMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
 }

@@ -306,18 +306,24 @@ func isDigitOrDot(c byte) bool {
 	return (c >= '0' && c <= '9') || c == '.'
 }
 
+// WebSearchToolConfig 创建 web_search 工具时的选项
+type WebSearchToolConfig struct {
+	SearxInstances []string // 为空时使用内置公共 Searx 列表
+	Mock           bool     // true 时不访问外网，返回模拟结果
+}
+
 // 内置工具：网络搜索（DuckDuckGo HTML/Lite + SearxNG 聚合，均无 API Key）
-// searxInstances 为 SearxNG 根 URL 列表（如 https://searx.be）；为空时使用内置公共实例（可能随时间失效，建议在 config 中自行维护）。
-func NewWebSearchTool(searxInstances []string) Tool {
-	bases := searxInstances
+func NewWebSearchTool(cfg WebSearchToolConfig) Tool {
+	bases := cfg.SearxInstances
 	if len(bases) == 0 {
 		bases = defaultSearxBases()
 	}
-	return &webSearchTool{searxBases: bases}
+	return &webSearchTool{searxBases: bases, mock: cfg.Mock}
 }
 
 type webSearchTool struct {
 	searxBases []string
+	mock       bool
 }
 
 // defaultSearxBases 公共 SearxNG 实例（零 Key）；实例可用性变化快，生产环境请在 config.search.searx_instances 中覆盖。
@@ -359,7 +365,11 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (s
 		return "", fmt.Errorf("missing or empty query")
 	}
 
-	logger.Info("开始网络搜索", map[string]interface{}{"query": query})
+	logger.Info("开始网络搜索", map[string]interface{}{"query": query, "mock": t.mock})
+
+	if t.mock {
+		return mockWebSearchAnswer(query), nil
+	}
 
 	client := &http.Client{Timeout: 25 * time.Second}
 
@@ -401,6 +411,20 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]interface{}) (s
 
 type searchHit struct {
 	title, link, snippet string
+}
+
+// mockWebSearchAnswer 不访问外网，用于联调或搜索服务不可达时验证 Agent 流程。
+func mockWebSearchAnswer(query string) string {
+	return fmt.Sprintf(
+		"关于 \"%s\" 的搜索结果（**模拟数据**，未请求外网；生产请关闭 `search.web_search_mock`）：\n\n"+
+			"- **%[1]s — 示例文档**：模拟摘要：用于验证 web_search 工具与 Agent 的函数调用链路是否正常。\n"+
+			"  [链接](https://example.com/docs/mock-1)\n\n"+
+			"- **%[1]s — 常见问题**：模拟摘要：以下为占位内容，开启真实搜索后将返回 DuckDuckGo / Searx 结果。\n"+
+			"  [链接](https://example.com/faq/mock-2)\n\n"+
+			"- **%[1]s — 发行说明**：模拟摘要：在 `config.yaml` 中设置 `search.web_search_mock: false` 可走真实搜索。\n"+
+			"  [链接](https://example.com/changelog/mock-3)",
+		query,
+	)
 }
 
 func setBrowserHeaders(req *http.Request) {

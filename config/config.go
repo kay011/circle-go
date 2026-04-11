@@ -18,9 +18,8 @@ type Config struct {
 
 // SearchConfig 搜索配置
 type SearchConfig struct {
-	BaiduAPIKey    string   `yaml:"baidu_api_key"`
-	BaiduAPIURL    string   `yaml:"baidu_api_url"`
 	SearxInstances []string `yaml:"searx_instances"` // 可选：SearxNG 实例根 URL（无 Key 聚合），如 https://searx.be
+	WebSearchMock  bool     `yaml:"web_search_mock"` // true：web_search 不访问外网，返回模拟结果（联调/无外网环境）
 }
 
 // ServerConfig 服务器配置
@@ -90,10 +89,6 @@ func Load(path string) (*Config, error) {
 		cfg.Memory.LongTermPath = "./memory"
 	}
 
-	// 设置搜索配置默认值
-	if cfg.Search.BaiduAPIURL == "" {
-		cfg.Search.BaiduAPIURL = "https://qianfan.baidubce.com/v2/ai_search/web_search"
-	}
 	// searx_instances 为空时由 tools 包使用内置列表；若配置了则完全以配置为准
 
 	return &cfg, nil

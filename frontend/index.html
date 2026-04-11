@@ -2,8 +2,14 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Agent Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="theme-color" content="#fbfdfc">
+    <meta name="format-detection" content="telephone=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <title>Circle · AI Agent</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Markdown 渲染和代码高亮 -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -17,147 +23,270 @@
         }
 
         :root {
-            --primary-color: #5B8FF9;
-            --primary-hover: #4778E8;
-            --bg-color: #F5F7FA;
-            --chat-bg: #FFFFFF;
-            --user-msg-bg: #5B8FF9;
-            --ai-msg-bg: #F0F2F5;
-            --text-primary: #333333;
-            --text-secondary: #666666;
-            --border-color: #E8E8E8;
-            --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            /* 浅绿主题 · 参考豆包式清爽布局 */
+            --primary-color: #0d9488;
+            --primary-hover: #0f766e;
+            --primary-soft: rgba(13, 148, 136, 0.12);
+            --accent-glow: rgba(45, 212, 191, 0.28);
+            --bg-color: #eef5f2;
+            --bg-page:
+                radial-gradient(ellipse 100% 70% at 50% 0%, rgba(13, 148, 136, 0.08), transparent 55%),
+                linear-gradient(180deg, #e8f2ee 0%, #f2f7f5 45%, #f6f9f8 100%);
+            --chat-bg: #fbfdfc;
+            --ai-msg-bg: #ffffff;
+            --ai-msg-border: rgba(13, 148, 136, 0.12);
+            --ai-msg-accent: #0d9488;
+            --text-primary: #0f172a;
+            --text-secondary: #64748b;
+            --border-color: rgba(15, 23, 42, 0.09);
+            --radius-app: 24px;
+            --radius-md: 12px;
+            --radius-bubble: 16px;
+            --shadow-app: 0 8px 32px rgba(15, 23, 42, 0.1), 0 2px 8px rgba(15, 23, 42, 0.06);
+            --shadow-bubble-ai: 0 2px 8px rgba(15, 23, 42, 0.06);
+            /* iOS 优先：系统 SF + 苹方 / 冬青黑，贴近豆包 iOS 端字重与排版 */
+            --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            --ios-separator: rgba(60, 60, 67, 0.29);
+            --ios-fill-quaternary: rgba(120, 120, 128, 0.12);
+        }
+
+        html {
+            height: 100%;
+            background-color: var(--bg-color);
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-            background: var(--bg-color);
-            height: 100vh;
+            font-family: var(--font);
+            background: var(--bg-page);
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-size: 15px;
+            line-height: 1.6;
+            letter-spacing: 0.01em;
+            -webkit-font-smoothing: antialiased;
+            -webkit-tap-highlight-color: transparent;
+            min-height: 100vh;
+            min-height: 100dvh;
             overflow: hidden;
+            padding: 0;
+            margin: 0;
+            touch-action: pan-y;
         }
 
+        /* 全屏沉浸式外壳（仿豆包 App 主界面） */
         .app-container {
-            max-width: 900px;
-            margin: 0 auto;
+            max-width: 100%;
+            width: 100%;
+            margin: 0;
             height: 100vh;
+            height: 100dvh;
+            max-height: 100vh;
+            max-height: 100dvh;
             display: flex;
             flex-direction: column;
             background: var(--chat-bg);
-            box-shadow: var(--shadow);
+            border: none;
+            border-radius: 0;
+            overflow: hidden;
+            box-shadow: none;
         }
 
-        /* 头部样式 */
+        /* 顶栏：豆包 iOS — 导航栏材质 + 细分割线（UIKit 风格） */
         .header {
-            padding: 16px 24px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            background: white;
+            flex-shrink: 0;
+            padding: 0;
+            padding-top: max(0px, env(safe-area-inset-top));
+            border-bottom: 0.33px solid var(--ios-separator);
+            background: rgba(249, 249, 249, 0.82);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
             z-index: 10;
         }
 
-        .header-left {
-            display: flex;
+        .header-inner {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
             align-items: center;
-            gap: 12px;
+            min-height: 44px;
+            padding: 4px 8px;
+            padding-left: max(8px, env(safe-area-inset-left));
+            padding-right: max(8px, env(safe-area-inset-right));
+            box-sizing: border-box;
         }
 
-        .logo {
-            width: 36px;
-            height: 36px;
-            background: linear-gradient(135deg, var(--primary-color), #7EA8FF);
-            border-radius: 10px;
+        .header-start {
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+        }
+
+        .header-center {
+            justify-self: center;
+            text-align: center;
+            min-width: 0;
+            max-width: min(56vw, 280px);
+        }
+
+        .header-product {
+            margin: 0;
+            padding: 0;
+            font-size: 17px;
+            font-weight: 590;
+            letter-spacing: -0.022em;
+            color: #000;
+            line-height: 1.29;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        @supports not (font-weight: 590) {
+            .header-product {
+                font-weight: 600;
+            }
+        }
+
+        .header-end {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+        }
+
+        .header-bar-btn {
+            width: 44px;
+            height: 44px;
+            border: none;
+            background: transparent;
+            border-radius: 12px;
+            cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: white;
+            color: #3d3d3d;
             font-size: 18px;
+            transition: background 0.18s ease, color 0.18s ease;
         }
 
-        .header-title {
-            font-size: 18px;
-            font-weight: 600;
-            color: var(--text-primary);
+        @media (hover: hover) {
+            .header-bar-btn:hover {
+                background: rgba(13, 148, 136, 0.08);
+                color: #2d3748;
+            }
         }
 
-        .header-actions {
-            display: flex;
-            gap: 8px;
+        .header-bar-btn:active {
+            background: var(--ios-fill-quaternary);
+            opacity: 0.92;
+        }
+
+        .header-bar-btn:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 2px;
         }
 
         .btn-icon {
-            width: 36px;
-            height: 36px;
+            width: 40px;
+            height: 40px;
             border: none;
             background: transparent;
-            border-radius: 8px;
+            border-radius: 10px;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             color: var(--text-secondary);
-            transition: all 0.2s;
+            transition: background 0.18s ease, color 0.18s ease;
         }
 
         .btn-icon:hover {
-            background: var(--bg-color);
-            color: var(--primary-color);
+            background: rgba(13, 148, 136, 0.08);
+            color: var(--text-primary);
         }
 
-        /* 会话选择器 */
+        .btn-icon:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 2px;
+        }
+
+        /* 会话栏：浅青底 */
         .session-bar {
-            padding: 12px 24px;
-            border-bottom: 1px solid var(--border-color);
+            padding: 12px 22px;
+            border-bottom: 1px solid rgba(13, 148, 136, 0.12);
             display: flex;
             align-items: center;
             gap: 12px;
-            background: #FAFBFC;
+            background: linear-gradient(180deg, #ecfdf5 0%, #f0fdf9 100%);
         }
 
         .session-select {
             flex: 1;
-            padding: 8px 12px;
+            padding: 10px 14px;
             border: 1px solid var(--border-color);
-            border-radius: 8px;
+            border-radius: 10px;
             font-size: 14px;
-            background: white;
+            background: #fff;
             cursor: pointer;
             outline: none;
+            color: var(--text-primary);
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .session-select:hover {
+            border-color: rgba(13, 148, 136, 0.4);
         }
 
         .session-select:focus {
             border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px var(--primary-soft);
         }
 
         .btn-new-session {
-            padding: 8px 16px;
+            min-height: 44px;
+            padding: 0 18px;
             background: var(--primary-color);
-            color: white;
+            color: #fff;
             border: none;
-            border-radius: 8px;
-            font-size: 14px;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            font-family: inherit;
+            letter-spacing: -0.01em;
             cursor: pointer;
             display: flex;
             align-items: center;
-            gap: 6px;
-            transition: all 0.2s;
+            justify-content: center;
+            gap: 8px;
+            transition: background 0.15s ease, transform 0.1s ease, opacity 0.15s;
+            box-shadow: 0 1px 3px rgba(13, 148, 136, 0.35);
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
         }
 
-        .btn-new-session:hover {
-            background: var(--primary-hover);
+        @media (hover: hover) {
+            .btn-new-session:hover {
+                background: var(--primary-hover);
+            }
         }
 
-        /* 聊天区域 */
+        .btn-new-session:active {
+            transform: scale(0.98);
+            opacity: 0.92;
+        }
+
+        /* 聊天区：iOS 惯性滚动 + 避免父级橡皮筋 */
         .chat-container {
             flex: 1;
             overflow-y: auto;
-            padding: 24px;
+            min-height: 0;
+            padding: 16px max(16px, env(safe-area-inset-left)) 20px max(16px, env(safe-area-inset-right));
             scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior-y: contain;
+            background: linear-gradient(180deg, #fafafa 0%, #f6faf8 45%, #f3f7f5 100%);
         }
 
         .chat-container::-webkit-scrollbar {
-            width: 6px;
+            width: 8px;
         }
 
         .chat-container::-webkit-scrollbar-track {
@@ -165,33 +294,35 @@
         }
 
         .chat-container::-webkit-scrollbar-thumb {
-            background: #D0D0D0;
-            border-radius: 3px;
+            background: rgba(15, 23, 42, 0.12);
+            border-radius: 8px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
         }
 
         .chat-container::-webkit-scrollbar-thumb:hover {
-            background: #B0B0B0;
+            background: rgba(15, 23, 42, 0.2);
+            background-clip: padding-box;
         }
 
         .messages-wrapper {
             display: flex;
             flex-direction: column;
             gap: 20px;
-            max-width: 800px;
+            max-width: 720px;
             margin: 0 auto;
         }
 
-        /* 消息样式 */
         .message {
             display: flex;
-            gap: 12px;
-            animation: messageSlideIn 0.3s ease-out;
+            gap: 14px;
+            animation: messageSlideIn 0.38s cubic-bezier(0.22, 1, 0.36, 1);
         }
 
         @keyframes messageSlideIn {
             from {
                 opacity: 0;
-                transform: translateY(10px);
+                transform: translateY(12px);
             }
             to {
                 opacity: 1;
@@ -204,31 +335,34 @@
         }
 
         .message-avatar {
-            width: 36px;
-            height: 36px;
+            width: 38px;
+            height: 38px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             flex-shrink: 0;
-            font-size: 16px;
+            font-size: 15px;
+            box-shadow: var(--shadow-bubble-ai);
         }
 
         .message.ai .message-avatar {
-            background: linear-gradient(135deg, var(--primary-color), #7EA8FF);
+            background: linear-gradient(145deg, #2dd4bf 0%, var(--primary-color) 55%, #0f766e 100%);
             color: white;
+            box-shadow: 0 2px 12px rgba(13, 148, 136, 0.35);
         }
 
         .message.user .message-avatar {
-            background: #E8E8E8;
+            background: linear-gradient(180deg, #fff 0%, #eef0f5 100%);
             color: var(--text-secondary);
+            border: 1px solid rgba(15, 23, 42, 0.06);
         }
 
         .message-content-wrapper {
-            max-width: 70%;
+            max-width: min(72%, 520px);
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 6px;
         }
 
         .message.user .message-content-wrapper {
@@ -236,32 +370,51 @@
         }
 
         .message-bubble {
-            padding: 12px 16px;
-            border-radius: 12px;
-            line-height: 1.6;
+            padding: 13px 17px;
+            border-radius: var(--radius-bubble);
+            line-height: 1.65;
             word-wrap: break-word;
             white-space: pre-wrap;
         }
 
         .message.ai .message-bubble {
-            background: var(--ai-msg-bg);
+            background: #fff;
             color: var(--text-primary);
-            border-top-left-radius: 4px;
+            border: 1px solid rgba(13, 148, 136, 0.1);
+            border-radius: 18px;
+            border-top-left-radius: 6px;
+            box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
         }
 
         .message.user .message-bubble {
-            background: var(--user-msg-bg);
-            color: white;
-            border-top-right-radius: 4px;
+            background: linear-gradient(135deg, #5eead4 0%, var(--primary-color) 48%, #0d9488 100%);
+            color: #fff;
+            border-radius: 18px;
+            border-top-right-radius: 6px;
+            box-shadow: 0 4px 16px rgba(13, 148, 136, 0.22);
         }
 
-        /* Markdown 样式 */
+        /* Markdown */
         .message-bubble.markdown-content {
             white-space: normal;
         }
 
+        .message-bubble.markdown-content h1,
+        .message-bubble.markdown-content h2,
+        .message-bubble.markdown-content h3 {
+            font-weight: 650;
+            letter-spacing: -0.02em;
+            margin: 14px 0 8px;
+            line-height: 1.35;
+            color: var(--text-primary);
+        }
+
+        .message-bubble.markdown-content h1 { font-size: 1.35rem; }
+        .message-bubble.markdown-content h2 { font-size: 1.2rem; }
+        .message-bubble.markdown-content h3 { font-size: 1.05rem; }
+
         .message-bubble.markdown-content p {
-            margin: 8px 0;
+            margin: 9px 0;
         }
 
         .message-bubble.markdown-content p:first-child {
@@ -272,207 +425,256 @@
             margin-bottom: 0;
         }
 
+        .message-bubble.markdown-content a {
+            color: var(--primary-color);
+            text-decoration: none;
+            border-bottom: 1px solid rgba(13, 148, 136, 0.35);
+        }
+
+        .message-bubble.markdown-content a:hover {
+            border-bottom-color: var(--primary-color);
+        }
+
+        .message.user .message-bubble.markdown-content a {
+            color: #e8ecff;
+            border-bottom-color: rgba(255, 255, 255, 0.45);
+        }
+
         .message-bubble.markdown-content code {
-            background: rgba(0, 0, 0, 0.06);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 0.9em;
+            background: rgba(13, 148, 136, 0.09);
+            padding: 2px 7px;
+            border-radius: 6px;
+            font-family: ui-monospace, 'SF Mono', 'Consolas', 'Monaco', monospace;
+            font-size: 0.88em;
         }
 
         .message.user .message-bubble.markdown-content code {
-            background: rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.22);
         }
 
         .message-bubble.markdown-content pre {
-            background: #1e1e1e;
-            padding: 16px;
-            border-radius: 8px;
+            background: linear-gradient(165deg, #1a1d24 0%, #14161c 100%);
+            padding: 14px 16px;
+            border-radius: 10px;
             overflow-x: auto;
             margin: 12px 0;
+            border: 1px solid rgba(255, 255, 255, 0.06);
         }
 
         .message-bubble.markdown-content pre code {
             background: transparent;
             padding: 0;
-            color: #d4d4d4;
+            color: #e4e6eb;
         }
 
         .message-bubble.markdown-content ul,
         .message-bubble.markdown-content ol {
             margin: 8px 0;
-            padding-left: 24px;
+            padding-left: 22px;
         }
 
         .message-bubble.markdown-content li {
-            margin: 4px 0;
+            margin: 5px 0;
+        }
+
+        .message-bubble.markdown-content hr {
+            border: none;
+            height: 1px;
+            background: var(--border-color);
+            margin: 16px 0;
         }
 
         .message-bubble.markdown-content blockquote {
-            border-left: 4px solid var(--primary-color);
-            padding-left: 12px;
-            margin: 8px 0;
+            border-left: 3px solid var(--primary-color);
+            padding: 6px 0 6px 14px;
+            margin: 10px 0;
             color: var(--text-secondary);
+            background: rgba(13, 148, 136, 0.04);
+            border-radius: 0 8px 8px 0;
         }
 
         .message-bubble.markdown-content table {
             border-collapse: collapse;
             width: 100%;
             margin: 12px 0;
+            font-size: 14px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
         }
 
         .message-bubble.markdown-content th,
         .message-bubble.markdown-content td {
             border: 1px solid var(--border-color);
-            padding: 8px 12px;
+            padding: 9px 12px;
             text-align: left;
         }
 
         .message-bubble.markdown-content th {
-            background: rgba(0, 0, 0, 0.05);
+            background: rgba(13, 148, 136, 0.07);
             font-weight: 600;
         }
 
-        /* 工具调用：可折叠 */
-        .tool-call-collapsible {
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            background: #fafbfc;
-            overflow: hidden;
-            margin: 4px 0;
+        /* 思考 / 工具过程：嵌在同一 AI 气泡顶部，弱样式折叠 */
+        .message-bubble.combined-ai-bubble {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            align-items: stretch;
         }
 
-        .tool-call-collapsible > summary {
+        .combined-answer-root {
+            min-height: 0;
+        }
+
+        .combined-answer-root:empty {
+            min-height: 0;
+        }
+
+        .aux-chain {
+            border-radius: 12px;
+            background: rgba(120, 120, 128, 0.06);
+            border: 0.33px solid rgba(60, 60, 67, 0.12);
+            overflow: hidden;
+        }
+
+        .aux-chain > summary {
             list-style: none;
             cursor: pointer;
-            padding: 10px 14px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 12px;
-            font-size: 14px;
-            color: var(--text-primary);
+            gap: 10px;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 500;
+            color: rgba(60, 60, 67, 0.55);
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .aux-chain > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .aux-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .aux-title i {
+            font-size: 11px;
+            opacity: 0.75;
+        }
+
+        .aux-status {
+            font-size: 11px;
+            font-weight: 400;
+            color: rgba(60, 60, 67, 0.45);
+        }
+
+        .aux-chain--done > summary {
+            padding: 6px 12px;
+            color: rgba(60, 60, 67, 0.42);
+        }
+
+        .aux-chain--done > summary .aux-status {
+            display: none;
+        }
+
+        .aux-chain-body {
+            padding: 0 10px 10px 12px;
+            border-top: 0.33px solid rgba(60, 60, 67, 0.08);
+        }
+
+        .aux-item {
+            margin-top: 8px;
+            font-size: 12px;
+            color: rgba(60, 60, 67, 0.72);
+            line-height: 1.45;
+        }
+
+        .aux-item:first-child {
+            margin-top: 6px;
+        }
+
+        .aux-k {
+            display: block;
+            font-size: 11px;
+            color: rgba(60, 60, 67, 0.45);
+            margin-bottom: 2px;
+        }
+
+        .aux-item-name {
+            font-weight: 600;
+            color: rgba(60, 60, 67, 0.85);
+        }
+
+        .aux-line {
+            margin-top: 6px;
+            font-size: 12px;
+            color: rgba(60, 60, 67, 0.5);
+            line-height: 1.4;
+        }
+
+        .aux-pre {
+            margin: 6px 0 0;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.65);
+            border: 0.33px solid rgba(60, 60, 67, 0.1);
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: 11px;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 160px;
+            overflow: auto;
+            color: rgba(60, 60, 67, 0.75);
+        }
+
+        .aux-result-block {
+            margin-top: 8px;
+        }
+
+        .aux-result-block > summary {
+            list-style: none;
+            cursor: pointer;
+            font-size: 11px;
+            color: rgba(60, 60, 67, 0.48);
+            padding: 4px 0;
             user-select: none;
         }
 
-        .tool-call-collapsible > summary::-webkit-details-marker {
+        .aux-result-block > summary::-webkit-details-marker {
             display: none;
         }
 
-        .tool-call-summary-left {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            min-width: 0;
-        }
-
-        .tool-call-summary-left i {
-            color: var(--primary-color);
-        }
-
-        .tool-call-chevron {
-            flex-shrink: 0;
-            color: var(--text-secondary);
-            transition: transform 0.2s ease;
-        }
-
-        .tool-call-collapsible[open] .tool-call-chevron i {
-            transform: rotate(180deg);
-        }
-
-        .tool-call-body {
-            padding: 0 14px 12px;
-            border-top: 1px solid var(--border-color);
-            background: white;
-        }
-
-        .tool-call-args pre {
-            margin: 10px 0 0;
-            padding: 12px;
+        .aux-result-pre {
+            margin: 4px 0 0;
+            padding: 8px 10px;
             border-radius: 8px;
-            background: #f6f8fa;
-            border: 1px solid #e8eaed;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 12px;
-            line-height: 1.5;
+            background: rgba(30, 32, 40, 0.92);
+            color: #c5c8d0;
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: 10px;
+            line-height: 1.45;
             white-space: pre-wrap;
             word-break: break-word;
-            max-height: 220px;
-            overflow: auto;
-        }
-
-        .tool-call-done {
-            margin-top: 8px;
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-
-        .tool-call-done i {
-            color: #52c41a;
-            margin-right: 4px;
-        }
-
-        /* 工具执行结果：可折叠 */
-        .tool-result-collapsible {
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            background: #fafbfc;
-            overflow: hidden;
-            margin: 4px 0;
-        }
-
-        .tool-result-collapsible > summary {
-            list-style: none;
-            cursor: pointer;
-            padding: 10px 14px;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--text-primary);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-
-        .tool-result-collapsible > summary::-webkit-details-marker {
-            display: none;
-        }
-
-        .tool-result-summary .hint {
-            font-size: 12px;
-            font-weight: 400;
-            color: var(--text-secondary);
-        }
-
-        .stream-meta-msg .message-bubble {
-            background: #EEF2FF;
-            color: #4a5568;
-            font-size: 13px;
-            border-top-left-radius: 4px;
-        }
-
-        .tool-result-snippet {
-            margin: 0;
-            padding: 12px 14px 14px;
-            background: #1e1e1e;
-            color: #d4d4d4;
-            border-top: 1px solid var(--border-color);
-            font-size: 12px;
-            line-height: 1.5;
-            white-space: pre-wrap;
-            word-break: break-word;
-            max-height: min(50vh, 360px);
+            max-height: min(36vh, 240px);
             overflow-y: auto;
         }
 
         .message-bubble.stream-error {
-            background: #FFF2F0;
-            color: #CF1322;
-            border: 1px solid #FFCCC7;
+            background: linear-gradient(180deg, #fff5f5 0%, #fffbfc 100%);
+            color: #c41e3a;
+            border: 1px solid rgba(196, 30, 58, 0.2);
         }
 
         .message-bubble.streaming {
-            border: 1px dashed var(--border-color);
+            border: 1px dashed rgba(13, 148, 136, 0.35);
+            background: linear-gradient(180deg, #fff 0%, #fafbff 100%);
         }
 
         .message-bubble.html-embed {
@@ -480,58 +682,73 @@
         }
 
         .message-time {
-            font-size: 12px;
+            font-size: 11px;
+            font-weight: 500;
             color: var(--text-secondary);
-            padding: 0 4px;
+            padding: 0 6px;
+            letter-spacing: 0.02em;
+            opacity: 0.85;
         }
 
-        /* 加载动画 */
+        .message.user .message-time {
+            text-align: right;
+        }
+
+        /* 打字指示 */
         .typing-indicator {
             display: flex;
-            gap: 4px;
-            padding: 12px 16px;
-            background: var(--ai-msg-bg);
-            border-radius: 12px;
-            border-top-left-radius: 4px;
+            gap: 5px;
+            padding: 14px 18px;
+            background: #fff;
+            border: 1px solid rgba(13, 148, 136, 0.1);
+            border-radius: 18px;
+            border-top-left-radius: 6px;
             width: fit-content;
+            box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
         }
 
         .typing-dot {
-            width: 8px;
-            height: 8px;
-            background: var(--text-secondary);
+            width: 7px;
+            height: 7px;
+            background: var(--primary-color);
+            opacity: 0.45;
             border-radius: 50%;
-            animation: typing 1.4s infinite;
+            animation: typing 1.35s ease-in-out infinite;
         }
 
         .typing-dot:nth-child(2) {
-            animation-delay: 0.2s;
+            animation-delay: 0.18s;
         }
 
         .typing-dot:nth-child(3) {
-            animation-delay: 0.4s;
+            animation-delay: 0.36s;
         }
 
         @keyframes typing {
-            0%, 60%, 100% {
+            0%, 70%, 100% {
                 transform: translateY(0);
-                opacity: 0.7;
+                opacity: 0.35;
             }
-            30% {
-                transform: translateY(-10px);
+            35% {
+                transform: translateY(-6px);
                 opacity: 1;
             }
         }
 
-        /* 输入区域 */
+        /* 输入区：贴近 iOS 底部 Composer + Home Indicator 留白 */
         .input-area {
-            padding: 16px 24px 24px;
-            border-top: 1px solid var(--border-color);
-            background: white;
+            padding-top: 8px;
+            padding-left: max(12px, env(safe-area-inset-left));
+            padding-right: max(12px, env(safe-area-inset-right));
+            padding-bottom: max(16px, calc(env(safe-area-inset-bottom) + 6px));
+            border-top: 0.33px solid var(--ios-separator);
+            background: rgba(249, 249, 249, 0.88);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
         }
 
         .input-wrapper {
-            max-width: 800px;
+            max-width: 720px;
             margin: 0 auto;
             position: relative;
         }
@@ -539,70 +756,90 @@
         .input-box {
             display: flex;
             align-items: flex-end;
-            gap: 12px;
-            padding: 12px 16px;
-            background: var(--bg-color);
-            border-radius: 16px;
-            border: 1px solid var(--border-color);
-            transition: all 0.2s;
+            gap: 8px;
+            padding: 8px 10px 8px 16px;
+            background: #e9e9eb;
+            border-radius: 24px;
+            border: none;
+            box-shadow: inset 0 0 0 0.33px rgba(60, 60, 67, 0.18);
+            transition: box-shadow 0.2s, background 0.2s;
         }
 
         .input-box:focus-within {
-            border-color: var(--primary-color);
-            background: white;
-            box-shadow: 0 0 0 3px rgba(91, 143, 249, 0.1);
+            background: #fff;
+            box-shadow:
+                inset 0 0 0 0.33px rgba(13, 148, 136, 0.45),
+                0 0 0 3px var(--primary-soft);
         }
 
         .message-input {
             flex: 1;
             border: none;
             background: transparent;
-            font-size: 15px;
-            line-height: 1.5;
+            font-size: 17px;
+            line-height: 1.47;
             resize: none;
             outline: none;
             max-height: 120px;
-            min-height: 24px;
+            min-height: 26px;
             font-family: inherit;
+            color: #000;
         }
 
         .message-input::placeholder {
-            color: #999;
+            color: rgba(60, 60, 67, 0.6);
         }
 
         .send-button {
             width: 36px;
             height: 36px;
             border: none;
-            background: var(--primary-color);
+            background: linear-gradient(155deg, #5eead4 0%, var(--primary-color) 55%, #0f766e 100%);
             color: white;
-            border-radius: 10px;
+            border-radius: 50%;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: all 0.2s;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s;
             flex-shrink: 0;
+            box-shadow: 0 1px 4px rgba(13, 148, 136, 0.28);
+            touch-action: manipulation;
         }
 
-        .send-button:hover:not(:disabled) {
-            background: var(--primary-hover);
-            transform: scale(1.05);
+        @media (hover: hover) {
+            .send-button:hover:not(:disabled) {
+                transform: scale(1.04);
+                box-shadow: 0 3px 12px rgba(13, 148, 136, 0.32);
+            }
+        }
+
+        .send-button:active:not(:disabled) {
+            transform: scale(0.94);
+            opacity: 0.9;
         }
 
         .send-button:disabled {
-            background: #D0D0D0;
+            opacity: 0.45;
             cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        .send-button:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 2px;
         }
 
         .input-hint {
             text-align: center;
-            font-size: 12px;
-            color: var(--text-secondary);
+            font-size: 11px;
+            color: #9ca3af;
             margin-top: 8px;
+            letter-spacing: 0.02em;
         }
 
-        /* 欢迎界面 */
+        /* 欢迎页 */
         .welcome-screen {
             display: flex;
             flex-direction: column;
@@ -610,130 +847,372 @@
             justify-content: center;
             height: 100%;
             text-align: center;
-            padding: 40px;
+            padding: 40px 24px 56px;
         }
 
         .welcome-logo {
-            width: 80px;
-            height: 80px;
-            background: linear-gradient(135deg, var(--primary-color), #7EA8FF);
+            width: 64px;
+            height: 64px;
+            background: linear-gradient(150deg, #a7f3d0 0%, var(--primary-color) 55%, #0f766e 100%);
             border-radius: 20px;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
-            font-size: 36px;
-            margin-bottom: 24px;
+            font-size: 28px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 32px rgba(13, 148, 136, 0.22);
         }
 
         .welcome-title {
-            font-size: 28px;
+            font-size: 22px;
             font-weight: 600;
-            color: var(--text-primary);
-            margin-bottom: 12px;
+            letter-spacing: -0.02em;
+            color: #1c1f23;
+            margin-bottom: 8px;
         }
 
         .welcome-subtitle {
-            font-size: 16px;
-            color: var(--text-secondary);
+            font-size: 14px;
+            color: #8b9199;
+            max-width: 340px;
+            line-height: 1.6;
             margin-bottom: 32px;
         }
 
         .quick-actions {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 12px;
-            max-width: 600px;
+            gap: 10px;
+            max-width: 560px;
             width: 100%;
         }
 
         .quick-action-btn {
-            padding: 16px;
-            background: white;
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
+            padding: 14px 16px;
+            background: #fff;
+            border: 0.33px solid rgba(60, 60, 67, 0.12);
+            border-radius: 16px;
             cursor: pointer;
             text-align: left;
-            transition: all 0.2s;
+            transition: border-color 0.2s, box-shadow 0.2s ease, transform 0.12s ease;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
         }
 
-        .quick-action-btn:hover {
-            border-color: var(--primary-color);
-            box-shadow: 0 2px 8px rgba(91, 143, 249, 0.15);
+        @media (hover: hover) {
+            .quick-action-btn:hover {
+                border-color: rgba(13, 148, 136, 0.28);
+                box-shadow: 0 4px 16px rgba(13, 148, 136, 0.1);
+                transform: translateY(-1px);
+            }
+        }
+
+        .quick-action-btn:active {
+            transform: scale(0.98);
+            background: #fafafa;
         }
 
         .quick-action-icon {
-            font-size: 24px;
+            font-size: 22px;
             margin-bottom: 8px;
+            display: block;
         }
 
         .quick-action-text {
             font-size: 14px;
+            font-weight: 500;
             color: var(--text-primary);
+            letter-spacing: -0.01em;
         }
 
-        /* 响应式设计 */
         @media (max-width: 768px) {
-            .app-container {
-                max-width: 100%;
-            }
-
-            .header {
-                padding: 12px 16px;
-            }
-
-            .session-bar {
-                padding: 10px 16px;
-            }
-
             .chat-container {
-                padding: 16px;
+                padding: 14px 14px 20px;
             }
 
             .message-content-wrapper {
-                max-width: 85%;
+                max-width: 88%;
             }
 
-            .input-area {
-                padding: 12px 16px 16px;
+            .welcome-screen {
+                padding: 28px 16px 44px;
+            }
+
+            .welcome-title {
+                font-size: 21px;
             }
 
             .quick-actions {
                 grid-template-columns: 1fr;
             }
         }
+
+        /* 侧边栏 */
+        .sidebar-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.34);
+            backdrop-filter: saturate(180%) blur(12px);
+            -webkit-backdrop-filter: saturate(180%) blur(12px);
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+
+        .sidebar-backdrop[hidden] {
+            display: none !important;
+        }
+
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: min(300px, 88vw);
+            height: 100%;
+            z-index: 1001;
+            background: linear-gradient(180deg, #ffffff 0%, #f9fcfb 100%);
+            box-shadow: 8px 0 32px rgba(15, 23, 42, 0.08);
+            border-right: 1px solid rgba(13, 148, 136, 0.1);
+            transform: translateX(-100%);
+            transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar.open {
+            transform: translateX(0);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .sidebar {
+                transition-duration: 0.01ms;
+            }
+        }
+
+        .sidebar-inner {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            padding-top: max(0px, env(safe-area-inset-top));
+        }
+
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px 10px;
+            border-bottom: 0.33px solid var(--ios-separator);
+        }
+
+        .sidebar-title {
+            font-size: 17px;
+            font-weight: 590;
+            letter-spacing: -0.022em;
+            color: #000;
+        }
+
+        @supports not (font-weight: 590) {
+            .sidebar-title {
+                font-weight: 600;
+            }
+        }
+
+        .sidebar-close-btn {
+            color: var(--text-secondary) !important;
+        }
+
+        .sidebar-new {
+            margin: 12px 16px 8px;
+            width: auto;
+            justify-content: center;
+        }
+
+        .sidebar-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 12px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .sidebar-item {
+            width: 100%;
+            text-align: left;
+            min-height: 44px;
+            padding: 10px 14px;
+            border: none;
+            background: transparent;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 15px;
+            color: #000;
+            line-height: 1.35;
+            word-break: break-all;
+            transition: background 0.12s ease;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
+
+        @media (hover: hover) {
+            .sidebar-item:hover {
+                background: var(--ios-fill-quaternary);
+            }
+        }
+
+        .sidebar-item:active {
+            background: rgba(120, 120, 128, 0.16);
+        }
+
+        .sidebar-item.active {
+            background: rgba(13, 148, 136, 0.12);
+            color: #0f766e;
+            font-weight: 600;
+        }
+
+        .sidebar-empty {
+            padding: 24px 16px;
+            text-align: center;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .sidebar-toggle {
+            margin-right: 2px;
+        }
+
+        /* 用户头像与下拉（浅色顶栏） */
+        .user-menu {
+            position: relative;
+        }
+
+        .user-avatar-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 0.33px solid rgba(13, 148, 136, 0.35);
+            background: linear-gradient(160deg, #ecfdf5 0%, #ccfbf1 40%, #99f6e4 100%);
+            color: #0f766e;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.12s ease, opacity 0.12s;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        @media (hover: hover) {
+            .user-avatar-btn:hover {
+                transform: scale(1.06);
+                box-shadow: 0 2px 10px rgba(13, 148, 136, 0.18);
+            }
+        }
+
+        .user-avatar-btn:active {
+            transform: scale(0.94);
+            opacity: 0.88;
+        }
+
+        .user-avatar-btn:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 2px;
+        }
+
+        .user-dropdown {
+            position: absolute;
+            top: calc(100% + 10px);
+            right: 0;
+            min-width: 200px;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 12px 40px rgba(15, 23, 42, 0.15), 0 2px 8px rgba(15, 23, 42, 0.08);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            padding: 10px 0;
+            z-index: 2000;
+        }
+
+        .user-dropdown[hidden] {
+            display: none !important;
+        }
+
+        .user-dropdown-name {
+            padding: 6px 16px 10px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            border-bottom: 1px solid var(--border-color);
+            word-break: break-all;
+        }
+
+        .user-dropdown-logout {
+            width: 100%;
+            padding: 10px 16px;
+            border: none;
+            background: none;
+            text-align: left;
+            font-size: 14px;
+            color: #b91c1c;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.15s;
+        }
+
+        .user-dropdown-logout:hover {
+            background: rgba(185, 28, 28, 0.06);
+        }
     </style>
 </head>
 <body>
-    <div class="app-container">
-        <!-- 头部 -->
-        <div class="header">
-            <div class="header-left">
-                <div class="logo">
-                    <i class="fas fa-robot"></i>
+    <div id="appShell">
+        <button type="button" class="sidebar-backdrop" id="sidebarBackdrop" hidden aria-label="关闭侧边栏"></button>
+        <aside class="sidebar" id="sidebar" aria-hidden="true">
+            <div class="sidebar-inner">
+                <div class="sidebar-header">
+                    <h2 class="sidebar-title">对话记录</h2>
+                    <button type="button" class="btn-icon sidebar-close-btn" id="sidebarClose" aria-label="关闭">
+                        <i class="fas fa-times"></i>
+                    </button>
                 </div>
-                <div class="header-title">AI Agent</div>
-            </div>
-            <div class="header-actions">
-                <button class="btn-icon" onclick="clearChat()" title="清空对话">
-                    <i class="fas fa-trash-alt"></i>
+                <button type="button" class="btn-new-session sidebar-new" id="sidebarNewChat">
+                    <i class="fas fa-plus"></i>
+                    新建会话
                 </button>
-                <button class="btn-icon" onclick="toggleSettings()" title="设置">
-                    <i class="fas fa-cog"></i>
-                </button>
+                <div class="sidebar-list" id="sidebarHistoryList"></div>
             </div>
-        </div>
+        </aside>
 
-        <!-- 会话栏 -->
-        <div class="session-bar">
-            <select id="sessionSelect" class="session-select">
-                <option value="new">新会话</option>
-            </select>
-            <button class="btn-new-session" onclick="createNewSession()">
-                <i class="fas fa-plus"></i>
-                新建
-            </button>
-        </div>
+    <div class="app-container">
+        <!-- 头部：豆包式 左菜单 · 中标题 · 右头像 -->
+        <header class="header">
+            <div class="header-inner">
+                <div class="header-start">
+                    <button type="button" class="header-bar-btn sidebar-toggle" id="sidebarToggle" title="对话记录" aria-label="打开对话记录">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                </div>
+                <div class="header-center">
+                    <h1 class="header-product">Circle</h1>
+                </div>
+                <div class="header-end">
+                    <div class="user-menu" id="userMenu">
+                        <button type="button" class="user-avatar-btn" id="userAvatarBtn" title="账户" aria-expanded="false" aria-haspopup="true">
+                            <span class="user-avatar-letter" id="userAvatarLetter">?</span>
+                        </button>
+                        <div class="user-dropdown" id="userDropdown" hidden role="menu">
+                            <div class="user-dropdown-name" id="userDropdownName"></div>
+                            <button type="button" class="user-dropdown-logout" id="logoutBtn" role="menuitem">退出登录</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
 
         <!-- 聊天容器 -->
         <div class="chat-container" id="chatContainer">
@@ -742,8 +1221,8 @@
                 <div class="welcome-logo">
                     <i class="fas fa-robot"></i>
                 </div>
-                <div class="welcome-title">你好，我是 AI Agent</div>
-                <div class="welcome-subtitle">我可以帮你解答问题、执行任务、分析数据</div>
+                <div class="welcome-title">你好，我是 Circle</div>
+                <div class="welcome-subtitle">问我任何问题，或试试下面的快捷指令</div>
                 <div class="quick-actions">
                     <button class="quick-action-btn" onclick="sendQuickMessage('帮我计算 256 * 128')">
                         <div class="quick-action-icon">🔢</div>
@@ -775,7 +1254,7 @@
                     <textarea 
                         id="messageInput" 
                         class="message-input" 
-                        placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
+                        placeholder="发消息或输入 / 向 Circle 提问"
                         rows="1"
                         onkeydown="handleKeyDown(event)"
                         oninput="autoResize(this)"
@@ -788,7 +1267,9 @@
             </div>
         </div>
     </div>
+    </div>
 
+    <script src="auth.js"></script>
     <script>
         let currentSessionId = generateSessionId();
         let isStreaming = false;
@@ -798,6 +1279,105 @@
         const welcomeScreen = document.getElementById('welcomeScreen');
         const messageInput = document.getElementById('messageInput');
         const sendButton = document.getElementById('sendButton');
+        const sidebarEl = document.getElementById('sidebar');
+        const sidebarBackdropEl = document.getElementById('sidebarBackdrop');
+        const sidebarHistoryListEl = document.getElementById('sidebarHistoryList');
+        const userDropdownEl = document.getElementById('userDropdown');
+        const userAvatarBtnEl = document.getElementById('userAvatarBtn');
+
+        /** 本轮流式：同一 AI 气泡内「工具区 + 正文区」 */
+        let streamCombinedCtx = null;
+
+        let authRedirectSuppressed = false;
+
+        function avatarLetter(username) {
+            if (!username || !String(username).trim()) return '?';
+            return String(username).trim()[0].toUpperCase();
+        }
+
+        function updateUserUI(username) {
+            document.getElementById('userAvatarLetter').textContent = avatarLetter(username);
+            document.getElementById('userDropdownName').textContent = username || '';
+        }
+
+        function closeUserDropdown() {
+            userDropdownEl.hidden = true;
+            userAvatarBtnEl.setAttribute('aria-expanded', 'false');
+        }
+
+        function toggleUserDropdown() {
+            closeSidebar();
+            const open = userDropdownEl.hidden;
+            userDropdownEl.hidden = !open;
+            userAvatarBtnEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+
+        function openSidebar() {
+            closeUserDropdown();
+            sidebarEl.classList.add('open');
+            sidebarBackdropEl.hidden = false;
+            sidebarEl.setAttribute('aria-hidden', 'false');
+        }
+
+        function closeSidebar() {
+            sidebarEl.classList.remove('open');
+            sidebarBackdropEl.hidden = true;
+            sidebarEl.setAttribute('aria-hidden', 'true');
+        }
+
+        async function authFetch(url, opts) {
+            const o = opts || {};
+            const headers = new Headers(o.headers || {});
+            const t = Auth.getToken();
+            if (t) headers.set('Authorization', 'Bearer ' + t);
+            if (o.body && typeof o.body === 'string' && !headers.has('Content-Type')) {
+                headers.set('Content-Type', 'application/json');
+            }
+            const res = await fetch(url, Object.assign({}, o, { headers }));
+            if (res.status === 401 && !authRedirectSuppressed) {
+                Auth.clearAuth();
+                closeUserDropdown();
+                window.location.replace('login.html');
+            }
+            return res;
+        }
+
+        async function bootstrapAuth() {
+            const token = Auth.getToken();
+            const savedName = Auth.getSavedUsername();
+            if (!token) {
+                window.location.replace('login.html');
+                return false;
+            }
+            try {
+                const res = await fetch('/api/auth/me', {
+                    headers: { Authorization: 'Bearer ' + token }
+                });
+                if (!res.ok) throw new Error('unauthorized');
+                const data = await res.json();
+                const name = data.username || savedName || '';
+                updateUserUI(name);
+                refreshSidebarHistory();
+                return true;
+            } catch (e) {
+                Auth.clearAuth();
+                window.location.replace('login.html');
+                return false;
+            }
+        }
+
+        async function logout() {
+            authRedirectSuppressed = true;
+            try {
+                await authFetch('/api/auth/logout', { method: 'POST' });
+            } catch (e) {
+                /* ignore */
+            }
+            authRedirectSuppressed = false;
+            Auth.clearAuth();
+            closeUserDropdown();
+            window.location.replace('login.html');
+        }
 
         // 生成会话ID
         function generateSessionId() {
@@ -919,6 +1499,134 @@
             return null;
         }
 
+        function resetStreamTurnState() {
+            streamCombinedCtx = null;
+        }
+
+        function getOrCreateCombinedMessage() {
+            if (streamCombinedCtx) return streamCombinedCtx;
+            hideWelcomeScreen();
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message ai';
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.innerHTML = '<i class="fas fa-robot"></i>';
+            const contentWrapper = document.createElement('div');
+            contentWrapper.className = 'message-content-wrapper';
+            const outerBubble = document.createElement('div');
+            outerBubble.className = 'message-bubble combined-ai-bubble markdown-content streaming';
+            const mainEl = document.createElement('div');
+            mainEl.className = 'combined-answer-root';
+            outerBubble.appendChild(mainEl);
+            const time = document.createElement('div');
+            time.className = 'message-time';
+            time.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            contentWrapper.appendChild(outerBubble);
+            contentWrapper.appendChild(time);
+            messageDiv.appendChild(avatar);
+            messageDiv.appendChild(contentWrapper);
+            messagesWrapper.appendChild(messageDiv);
+            messages.push({ role: 'ai', element: messageDiv, type: 'streaming', content: '' });
+            streamCombinedCtx = {
+                messageDiv,
+                outerBubble,
+                mainEl,
+                auxWrap: null,
+                detailsEl: null,
+                bodyEl: null,
+                statusEl: null
+            };
+            scrollToBottom();
+            return streamCombinedCtx;
+        }
+
+        function ensureAuxBlockInCombined() {
+            const ctx = getOrCreateCombinedMessage();
+            if (ctx.auxWrap) return ctx;
+            const auxWrap = document.createElement('div');
+            auxWrap.className = 'aux-inline-wrap';
+            const details = document.createElement('details');
+            details.className = 'aux-chain';
+            details.open = false;
+            const summary = document.createElement('summary');
+            summary.innerHTML = '<span class="aux-title"><i class="fas fa-ellipsis-h"></i><span>思考中 · Exploring</span></span><span class="aux-status">···</span>';
+            const body = document.createElement('div');
+            body.className = 'aux-chain-body';
+            details.appendChild(summary);
+            details.appendChild(body);
+            auxWrap.appendChild(details);
+            ctx.outerBubble.insertBefore(auxWrap, ctx.mainEl);
+            const statusEl = summary.querySelector('.aux-status');
+            ctx.auxWrap = auxWrap;
+            ctx.detailsEl = details;
+            ctx.bodyEl = body;
+            ctx.statusEl = statusEl;
+            scrollToBottom();
+            return ctx;
+        }
+
+        function appendToolCallJsonToAux(rawJson) {
+            const ctx = ensureAuxBlockInCombined();
+            let data;
+            try {
+                data = JSON.parse(rawJson);
+            } catch (e) {
+                return;
+            }
+            const tc = data.tool_call;
+            if (!tc || typeof tc !== 'object') return;
+            const name = escapeHtml(String(tc.name || ''));
+            let argsStr = '';
+            try {
+                argsStr = tc.arguments != null ? JSON.stringify(tc.arguments, null, 2) : '';
+            } catch (e) {
+                argsStr = String(tc.arguments);
+            }
+            const div = document.createElement('div');
+            div.className = 'aux-item';
+            div.innerHTML = '<span class="aux-k">调用</span><span class="aux-item-name">' + name + '</span><pre class="aux-pre">' + escapeHtml(argsStr) + '</pre>';
+            ctx.bodyEl.appendChild(div);
+            scrollToBottom();
+        }
+
+        function appendAuxMutedLine(text) {
+            const ctx = ensureAuxBlockInCombined();
+            const div = document.createElement('div');
+            div.className = 'aux-line';
+            div.textContent = text;
+            ctx.bodyEl.appendChild(div);
+            scrollToBottom();
+        }
+
+        function appendToolResultToAuxPanel(body) {
+            const ctx = ensureAuxBlockInCombined();
+            const wrap = document.createElement('details');
+            wrap.className = 'aux-result-block';
+            wrap.open = false;
+            const sum = document.createElement('summary');
+            sum.textContent = '执行结果';
+            const pre = document.createElement('pre');
+            pre.className = 'aux-result-pre';
+            pre.textContent = body;
+            wrap.appendChild(sum);
+            wrap.appendChild(pre);
+            ctx.bodyEl.appendChild(wrap);
+            scrollToBottom();
+        }
+
+        function finalizeStreamAuxPanel() {
+            if (!streamCombinedCtx || !streamCombinedCtx.auxWrap) return;
+            const ctx = streamCombinedCtx;
+            const { detailsEl, statusEl } = ctx;
+            if (statusEl) {
+                statusEl.textContent = '';
+            }
+            detailsEl.open = false;
+            detailsEl.classList.add('aux-chain--done');
+            streamCombinedCtx = null;
+            scrollToBottom();
+        }
+
         // 隐藏欢迎界面
         function hideWelcomeScreen() {
             welcomeScreen.style.display = 'none';
@@ -951,10 +1659,7 @@
             bubble.className = 'message-bubble';
             
             // 根据消息类型渲染内容
-            if (messageType === 'tool-call') {
-                bubble.classList.add('html-embed');
-                bubble.innerHTML = renderToolCall(content);
-            } else if (messageType === 'html') {
+            if (messageType === 'html') {
                 bubble.classList.add('html-embed');
                 bubble.innerHTML = content;
             } else if (messageType === 'plain') {
@@ -991,94 +1696,10 @@
             return { bubble, time, messageDiv };
         }
 
-        // 渲染工具调用：可折叠，默认收起
-        function renderToolCall(toolData) {
-            try {
-                const data = typeof toolData === 'string' ? JSON.parse(toolData) : toolData;
-                const toolCall = data.tool_call;
-                const name = escapeHtml(toolCall.name || '');
-                const args = escapeHtml(JSON.stringify(toolCall.arguments, null, 2));
-                
-                return `
-                    <details class="tool-call-collapsible">
-                        <summary class="tool-call-summary">
-                            <span class="tool-call-summary-left">
-                                <i class="fas fa-screwdriver-wrench"></i>
-                                <span>工具 <strong>${name}</strong></span>
-                            </span>
-                            <span class="tool-call-chevron"><i class="fas fa-chevron-down"></i></span>
-                        </summary>
-                        <div class="tool-call-body">
-                            <div class="tool-call-args"><pre>${args}</pre></div>
-                            <div class="tool-call-done"><i class="fas fa-check-circle"></i> 已发起调用，执行结果见下方消息</div>
-                        </div>
-                    </details>
-                `;
-            } catch (e) {
-                return '<details class="tool-call-collapsible"><summary>工具调用</summary><div class="tool-call-body">解析失败</div></details>';
-            }
-        }
-
-        function appendStreamMetaLine(text) {
-            hideWelcomeScreen();
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message ai stream-meta-msg';
-            const avatar = document.createElement('div');
-            avatar.className = 'message-avatar';
-            avatar.innerHTML = '<i class="fas fa-robot"></i>';
-            const contentWrapper = document.createElement('div');
-            contentWrapper.className = 'message-content-wrapper';
-            const bubble = document.createElement('div');
-            bubble.className = 'message-bubble';
-            bubble.textContent = text;
-            const time = document.createElement('div');
-            time.className = 'message-time';
-            time.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-            contentWrapper.appendChild(bubble);
-            contentWrapper.appendChild(time);
-            messageDiv.appendChild(avatar);
-            messageDiv.appendChild(contentWrapper);
-            messagesWrapper.appendChild(messageDiv);
-            messages.push({ role: 'ai', content: text, element: messageDiv, type: 'stream-meta' });
-            scrollToBottom();
-        }
-
-        function appendToolResultBlock(body) {
-            const esc = escapeHtml(body);
-            addMessage('ai', `
-                <details class="tool-result-collapsible">
-                    <summary class="tool-result-summary">
-                        工具执行结果
-                        <span class="hint">点击展开 / 收起</span>
-                    </summary>
-                    <pre class="tool-result-snippet">${esc}</pre>
-                </details>
-            `, false, 'html');
-        }
-
-        /** 创建用于流式正文的 AI 气泡，返回 bubble 节点 */
-        function createStreamingAssistantBubble() {
-            hideWelcomeScreen();
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message ai';
-            const avatar = document.createElement('div');
-            avatar.className = 'message-avatar';
-            avatar.innerHTML = '<i class="fas fa-robot"></i>';
-            const contentWrapper = document.createElement('div');
-            contentWrapper.className = 'message-content-wrapper';
-            const bubble = document.createElement('div');
-            bubble.className = 'message-bubble markdown-content streaming';
-            const time = document.createElement('div');
-            time.className = 'message-time';
-            time.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-            contentWrapper.appendChild(bubble);
-            contentWrapper.appendChild(time);
-            messageDiv.appendChild(avatar);
-            messageDiv.appendChild(contentWrapper);
-            messagesWrapper.appendChild(messageDiv);
-            messages.push({ role: 'ai', content: '', element: messageDiv, type: 'streaming' });
-            scrollToBottom();
-            return bubble;
+        /** 流式正文写入合并气泡内的 .combined-answer-root，返回该节点 */
+        function ensureMainStreamBubble() {
+            const ctx = getOrCreateCombinedMessage();
+            return ctx.mainEl;
         }
 
         // 显示打字指示器
@@ -1124,6 +1745,8 @@
             
             if (!message || isStreaming) return;
 
+            resetStreamTurnState();
+
             // 禁用输入
             isStreaming = true;
             sendButton.disabled = true;
@@ -1139,11 +1762,8 @@
 
             try {
                 // 发送请求到后端
-                const response = await fetch('/api/chat/stream', {
+                const response = await authFetch('/api/chat/stream', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
                     body: JSON.stringify({
                         session_id: currentSessionId,
                         message: message
@@ -1174,6 +1794,10 @@
                     }
                     if (removeStreamingClass && streamCharBubble) {
                         streamCharBubble.classList.remove('streaming');
+                        const combined = streamCharBubble.closest('.combined-ai-bubble');
+                        if (combined) {
+                            combined.classList.remove('streaming');
+                        }
                     }
                 }
 
@@ -1206,25 +1830,25 @@
 
                     if (tryParseToolCallPayload(data)) {
                         closeTextSegment();
-                        addMessage('ai', data, false, 'tool-call');
+                        appendToolCallJsonToAux(data);
                         return;
                     }
 
                     const trimmed = data.trimStart();
                     if (trimmed.startsWith('正在使用 ') && trimmed.includes('工具')) {
-                        appendStreamMetaLine(data.trim());
+                        appendAuxMutedLine(data.trim());
                         return;
                     }
                     if (trimmed.startsWith('工具执行结果:')) {
                         const i = data.indexOf('工具执行结果:');
                         const body = data.slice(i + '工具执行结果:'.length).trim();
-                        appendToolResultBlock(body);
+                        appendToolResultToAuxPanel(body);
                         return;
                     }
 
                     streamCharAccum += data;
                     if (!streamCharBubble) {
-                        streamCharBubble = createStreamingAssistantBubble();
+                        streamCharBubble = ensureMainStreamBubble();
                     }
                     scheduleMarkdownRefresh();
                 }
@@ -1249,12 +1873,14 @@
                 }
 
                 finalizeStreamText(true);
+                finalizeStreamAuxPanel();
 
-                loadSessions();
+                refreshSidebarHistory();
 
             } catch (error) {
                 console.error('发送消息错误:', error);
                 removeTypingIndicator();
+                finalizeStreamAuxPanel();
                 const { bubble } = addMessage('ai', `抱歉，发生错误：${error.message}`, false, 'plain');
                 bubble.classList.add('stream-error');
             } finally {
@@ -1272,31 +1898,16 @@
             messages = [];
             messagesWrapper.innerHTML = '';
             showWelcomeScreen();
-            
-            const now = new Date().toLocaleString('zh-CN');
-            const sessionSelect = document.getElementById('sessionSelect');
-            const option = document.createElement('option');
-            option.value = currentSessionId;
-            option.textContent = `会话 ${now}`;
-            option.selected = true;
-            sessionSelect.insertBefore(option, sessionSelect.firstChild.nextSibling);
-            
+            refreshSidebarHistory();
             showNotification('已创建新会话');
         }
 
-        // 清空聊天
-        function clearChat() {
-            if (confirm('确定要清空当前对话吗？')) {
-                messages = [];
-                messagesWrapper.innerHTML = '';
-                showWelcomeScreen();
-                showNotification('已清空对话');
-            }
-        }
-
-        // 切换设置
-        function toggleSettings() {
-            showNotification('设置功能开发中...');
+        function selectSessionFromHistory(sessionId) {
+            if (!sessionId) return;
+            currentSessionId = sessionId;
+            loadSessionHistory(currentSessionId);
+            refreshSidebarHistory();
+            closeSidebar();
         }
 
         // 显示通知
@@ -1323,28 +1934,33 @@
             }, 2000);
         }
 
-        // 加载会话列表（保留当前选中项）
-        function loadSessions() {
-            fetch('/api/sessions')
+        // 侧边栏：加载会话列表并高亮当前会话
+        function refreshSidebarHistory() {
+            authFetch('/api/sessions')
                 .then(response => {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();
                 })
                 .then(data => {
-                    const sessionSelect = document.getElementById('sessionSelect');
-                    const firstOption = sessionSelect.firstChild;
-                    sessionSelect.innerHTML = '';
-                    sessionSelect.appendChild(firstOption);
-                    
-                    (data.sessions || []).forEach(sessionId => {
-                        const option = document.createElement('option');
-                        option.value = sessionId;
-                        const label = sessionId.length > 22 ? sessionId.substring(0, 22) + '…' : sessionId;
-                        option.textContent = label;
-                        sessionSelect.appendChild(option);
+                    const ids = data.sessions || [];
+                    sidebarHistoryListEl.innerHTML = '';
+                    if (ids.length === 0) {
+                        const empty = document.createElement('div');
+                        empty.className = 'sidebar-empty';
+                        empty.textContent = '暂无历史会话，发一条消息开始吧';
+                        sidebarHistoryListEl.appendChild(empty);
+                        return;
+                    }
+                    ids.forEach(sessionId => {
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className = 'sidebar-item' + (sessionId === currentSessionId ? ' active' : '');
+                        const label = sessionId.length > 36 ? sessionId.substring(0, 36) + '…' : sessionId;
+                        btn.textContent = label;
+                        btn.title = sessionId;
+                        btn.addEventListener('click', () => selectSessionFromHistory(sessionId));
+                        sidebarHistoryListEl.appendChild(btn);
                     });
-                    const match = Array.from(sessionSelect.options).find(o => o.value === currentSessionId);
-                    if (match) sessionSelect.value = currentSessionId;
                 })
                 .catch(error => {
                     console.error('加载会话列表错误:', error);
@@ -1355,7 +1971,7 @@
         async function loadSessionHistory(sessionId) {
             if (!sessionId || sessionId === 'new') return;
             try {
-                const res = await fetch('/api/sessions/' + encodeURIComponent(sessionId));
+                const res = await authFetch('/api/sessions/' + encodeURIComponent(sessionId));
                 if (res.status === 404) {
                     throw new Error('会话不存在或已过期');
                 }
@@ -1382,14 +1998,33 @@
             }
         }
 
-        // 切换会话
-        document.getElementById('sessionSelect').addEventListener('change', function(e) {
-            const val = e.target.value;
-            if (val === 'new') {
-                createNewSession();
-            } else {
-                currentSessionId = val;
-                loadSessionHistory(currentSessionId);
+        document.getElementById('sidebarToggle').addEventListener('click', openSidebar);
+        document.getElementById('sidebarClose').addEventListener('click', closeSidebar);
+        sidebarBackdropEl.addEventListener('click', closeSidebar);
+        document.getElementById('sidebarNewChat').addEventListener('click', function() {
+            createNewSession();
+            closeSidebar();
+        });
+
+        document.getElementById('userAvatarBtn').addEventListener('click', function(e) {
+            e.stopPropagation();
+            toggleUserDropdown();
+        });
+        document.getElementById('logoutBtn').addEventListener('click', function(e) {
+            e.stopPropagation();
+            logout();
+        });
+        document.addEventListener('click', function() {
+            closeUserDropdown();
+        });
+        document.getElementById('userMenu').addEventListener('click', function(e) {
+            e.stopPropagation();
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeSidebar();
+                closeUserDropdown();
             }
         });
 
@@ -1405,12 +2040,13 @@
         `;
         document.head.appendChild(style);
 
-        // 初始化
-        window.onload = function() {
+        // 初始化（须先通过 bootstrapAuth，否则已跳转登录页）
+        window.onload = async function() {
+            const ok = await bootstrapAuth();
+            if (!ok) return;
             configureMarked();
-            loadSessions();
             messageInput.focus();
-            showNotification('欢迎使用 AI Agent');
+            showNotification('欢迎使用 Circle');
         };
     </script>
 </body>

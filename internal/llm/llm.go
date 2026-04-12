@@ -129,7 +129,7 @@ func (o *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
 	return result, err
 }
 
-// ChatStream 流式发送聊天请求
+// ChatStream 流式发送聊天请求（带重试和熔断）
 func (o *OpenAI) ChatStream(ctx context.Context, messages []Message, callback func(chunk string) error) error {
 	// 转换消息格式
 	openaiMessages := make([]openai.ChatCompletionMessage, len(messages))
@@ -140,34 +140,45 @@ func (o *OpenAI) ChatStream(ctx context.Context, messages []Message, callback fu
 		}
 	}
 
-	// 发送流式请求
-	stream, err := o.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
-		Model:       o.model,
-		Messages:    openaiMessages,
-		MaxTokens:   o.maxTokens,
-		Temperature: o.temperature,
-		Stream:      true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create chat completion stream: %w", err)
-	}
-	defer stream.Close()
-
-	// 处理流式响应
-	for {
-		response, err := stream.Recv()
-		if err != nil {
-			break
-		}
-
-		if len(response.Choices) > 0 && response.Choices[0].Delta.Content != "" {
-			if err := callback(response.Choices[0].Delta.Content); err != nil {
-				return err
+	var streamErr error
+	err := o.breaker.Execute(func() error {
+		return utils.RetryWithBackoff(ctx, o.retryConfig, nil, func() error {
+			// 发送流式请求
+			stream, err := o.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
+				Model:       o.model,
+				Messages:    openaiMessages,
+				MaxTokens:   o.maxTokens,
+				Temperature: o.temperature,
+				Stream:      true,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create chat completion stream: %w", err)
 			}
-		}
+			defer stream.Close()
+
+			// 处理流式响应
+			for {
+				response, err := stream.Recv()
+				if err != nil {
+					break
+				}
+
+				if len(response.Choices) > 0 && response.Choices[0].Delta.Content != "" {
+					if cbErr := callback(response.Choices[0].Delta.Content); cbErr != nil {
+						return fmt.Errorf("callback error: %w", cbErr)
+					}
+				}
+			}
+
+			return nil
+		})
+	})
+
+	if err != nil {
+		streamErr = err
 	}
 
-	return nil
+	return streamErr
 }
 
 // FunctionCall 发送函数调用请求（带重试和熔断）

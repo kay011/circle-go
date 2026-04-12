@@ -228,6 +228,7 @@ type Agent struct {
 	taskPlanner     *planner.Planner
 	reflector       *Reflector
 	maxSteps        int
+	maxToolHistory  int // 最大工具调用历史记录数
 	toolCallHistory []ToolCall
 	humanInTheLoop  bool
 	llmTools        []llm.Tool // 预先转换好的 LLM 工具列表
@@ -254,6 +255,7 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 		taskPlanner:     taskPlanner,
 		reflector:       reflector,
 		maxSteps:        maxSteps,
+		maxToolHistory:  20, // 最多保留20条工具调用历史
 		toolCallHistory: []ToolCall{},
 		humanInTheLoop:  humanInTheLoop,
 		llmTools:        llmTools,
@@ -464,8 +466,11 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 				return "检测到工具调用循环，请尝试简化问题或提供更多信息。", nil
 			}
 
-			// 添加到工具调用历史
+			// 添加到工具调用历史，并限制历史记录数量
 			a.toolCallHistory = append(a.toolCallHistory, currentToolCall)
+			if len(a.toolCallHistory) > a.maxToolHistory {
+				a.toolCallHistory = a.toolCallHistory[len(a.toolCallHistory)-a.maxToolHistory:]
+			}
 
 			// 执行工具
 			logging.IncrMetric("tool_calls_total")
@@ -690,8 +695,11 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				return msg, nil
 			}
 
-			// 添加到工具调用历史
+			// 添加到工具调用历史，并限制历史记录数量
 			a.toolCallHistory = append(a.toolCallHistory, currentToolCall)
+			if len(a.toolCallHistory) > a.maxToolHistory {
+				a.toolCallHistory = a.toolCallHistory[len(a.toolCallHistory)-a.maxToolHistory:]
+			}
 
 			// 检查是否启用了 human-in-the-loop
 			logger.Info("检查 human-in-the-loop 设置", map[string]interface{}{

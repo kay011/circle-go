@@ -43,6 +43,7 @@ type Server struct {
 	mcpClient     *mcp.MCPClient
 	server        *http.Server
 	rateLimiter   *middleware.RateLimiter
+	startTime     time.Time // 服务器启动时间
 }
 
 // NewServer 创建API服务器
@@ -99,6 +100,7 @@ func NewServer(cfg *config.Config) *Server {
 		agent:         agentInstance,
 		mcpClient:     mcpClient,
 		rateLimiter:   rateLimiter,
+		startTime:     time.Now(),
 	}
 }
 
@@ -630,7 +632,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "healthy",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 		"version":   "1.0.0",
-		"uptime":    time.Since(startTime).String(),
+		"uptime":    time.Since(s.startTime).String(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -724,6 +726,3 @@ func isValidEmail(email string) bool {
 
 	return hasDot
 }
-
-// startTime 服务器启动时间
-var startTime = time.Now()

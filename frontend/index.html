@@ -333,6 +333,93 @@
             font-weight: 600;
         }
 
+        /* 统一消息容器：思考过程、工具调用和回答都在一个气泡内 */
+        .message-bubble.unified-message {
+            padding: 0;
+            background: transparent;
+        }
+
+        .unified-message-container {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* 流式阶段：仅一条轻量状态（不展示内部推理与工具细节） */
+        .ai-thinking-chip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 12px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.035);
+            border: 1px solid var(--border-color);
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .ai-thinking-chip-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            flex-shrink: 0;
+            animation: aiThinkingPulse 1.2s ease-in-out infinite;
+        }
+
+        @keyframes aiThinkingPulse {
+            0%, 100% { opacity: 0.4; transform: scale(0.9); }
+            50% { opacity: 1; transform: scale(1); }
+        }
+
+        .ai-thinking-chip-title {
+            font-weight: 500;
+            color: var(--text-primary);
+            letter-spacing: 0.02em;
+        }
+
+        /* 思考过程 - 可折叠 */
+        .thinking-process {
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            background: #fafafa;
+            overflow: hidden;
+        }
+
+        .thinking-process > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 10px 14px;
+            font-size: 13px;
+            color: #666;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.2s;
+        }
+
+        .thinking-process > summary:hover {
+            background: #f0f0f0;
+        }
+
+        .thinking-process > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .thinking-process > summary i {
+            color: #5B8FF9;
+        }
+
+        .thinking-content {
+            padding: 12px 14px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #666;
+            border-top: 1px solid #e8e8e8;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
         /* 工具调用：可折叠 */
         .tool-call-collapsible {
             border: 1px solid var(--border-color);
@@ -448,6 +535,14 @@
             background: #EEF2FF;
             color: #4a5568;
             font-size: 13px;
+            border-top-left-radius: 4px;
+        }
+
+        /* 最终回答区域 */
+        .final-answer {
+            padding: 12px 16px;
+            background: var(--ai-msg-bg);
+            border-radius: 12px;
             border-top-left-radius: 4px;
         }
 
@@ -1010,13 +1105,143 @@
                         </summary>
                         <div class="tool-call-body">
                             <div class="tool-call-args"><pre>${args}</pre></div>
-                            <div class="tool-call-done"><i class="fas fa-check-circle"></i> 已发起调用，执行结果见下方消息</div>
                         </div>
                     </details>
                 `;
             } catch (e) {
                 return '<details class="tool-call-collapsible"><summary>工具调用</summary><div class="tool-call-body">解析失败</div></details>';
             }
+        }
+
+        // 创建统一消息容器（思考/工具阶段仅展示轻量「Exploring」条，不展示内部细节）
+        let currentUnifiedBubble = null;
+        let currentUnifiedContainer = null;
+        let thinkingChipEl = null;
+        let answerSection = null;
+
+        function dismissThinkingChip() {
+            if (thinkingChipEl && thinkingChipEl.parentNode) {
+                thinkingChipEl.remove();
+            }
+            thinkingChipEl = null;
+        }
+
+        /** 在最终回答上方显示一条「Exploring」状态（无展开内容、不展示工具与原始状态文案） */
+        function ensureThinkingChip() {
+            if (!currentUnifiedContainer) {
+                createUnifiedMessage();
+            }
+            if (thinkingChipEl && thinkingChipEl.isConnected) {
+                return thinkingChipEl;
+            }
+            const chip = document.createElement('div');
+            chip.className = 'ai-thinking-chip';
+            chip.setAttribute('role', 'status');
+            chip.setAttribute('aria-live', 'polite');
+            chip.innerHTML = `
+                <span class="ai-thinking-chip-dot" aria-hidden="true"></span>
+                <span class="ai-thinking-chip-title">Exploring</span>
+            `;
+            thinkingChipEl = chip;
+            if (answerSection && currentUnifiedContainer.contains(answerSection)) {
+                currentUnifiedContainer.insertBefore(chip, answerSection);
+            } else {
+                currentUnifiedContainer.appendChild(chip);
+            }
+            scrollToBottom();
+            return chip;
+        }
+
+        function createUnifiedMessage() {
+            hideWelcomeScreen();
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message ai';
+            
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.innerHTML = '<i class="fas fa-robot"></i>';
+            
+            const contentWrapper = document.createElement('div');
+            contentWrapper.className = 'message-content-wrapper';
+            
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble unified-message';
+            
+            const container = document.createElement('div');
+            container.className = 'unified-message-container';
+            bubble.appendChild(container);
+            
+            const time = document.createElement('div');
+            time.className = 'message-time';
+            time.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            
+            contentWrapper.appendChild(bubble);
+            contentWrapper.appendChild(time);
+            messageDiv.appendChild(avatar);
+            messageDiv.appendChild(contentWrapper);
+            messagesWrapper.appendChild(messageDiv);
+            
+            currentUnifiedBubble = bubble;
+            currentUnifiedContainer = container;
+            thinkingChipEl = null;
+            answerSection = null;
+            
+            messages.push({ role: 'ai', content: '', element: messageDiv, type: 'unified' });
+            scrollToBottom();
+            
+            return { bubble, container, messageDiv };
+        }
+
+        // 状态类 SSE：仅维持「Exploring」条，不向用户展示原始状态文案
+        function addThinkingToUnified(_thinkingText) {
+            ensureThinkingChip();
+        }
+
+        // 工具调用 JSON：不向用户展示参数等细节
+        function addToolCallToUnified(toolData) {
+            let data;
+            try {
+                data = typeof toolData === 'string' ? JSON.parse(toolData) : toolData;
+            } catch (_) {
+                return;
+            }
+            if (!data || !data.tool_call || typeof data.tool_call !== 'object') return;
+            ensureThinkingChip();
+        }
+
+        // 工具执行结果：不向用户展示原始输出
+        function addToolResultToUnified(_resultText) {
+            ensureThinkingChip();
+        }
+
+        // 获取或创建回答区域
+        function getOrCreateAnswerSection() {
+            if (!currentUnifiedContainer) {
+                createUnifiedMessage();
+            }
+            
+            if (!answerSection) {
+                answerSection = document.createElement('div');
+                answerSection.className = 'final-answer markdown-content streaming';
+                currentUnifiedContainer.appendChild(answerSection);
+            }
+            
+            return answerSection;
+        }
+
+        // 完成流式输出
+        function finalizeUnifiedMessage() {
+            if (currentUnifiedBubble) {
+                const answerEl = currentUnifiedBubble.querySelector('.final-answer');
+                if (answerEl) {
+                    answerEl.classList.remove('streaming');
+                }
+            }
+            dismissThinkingChip();
+            currentUnifiedBubble = null;
+            currentUnifiedContainer = null;
+            answerSection = null;
         }
 
         function appendStreamMetaLine(text) {
@@ -1188,6 +1413,9 @@
                     mdThrottle = setTimeout(() => {
                         mdThrottle = null;
                         if (streamCharBubble) {
+                            if (streamCharAccum.trim() !== '') {
+                                dismissThinkingChip();
+                            }
                             renderMarkdownToBubble(streamCharBubble, streamCharAccum);
                             scrollToBottom();
                         }
@@ -1197,34 +1425,55 @@
                 function handleStreamPayload(data) {
                     if (data === '' || data === '[DONE]') return;
 
+                    // 处理错误
                     if (data.startsWith('Error:')) {
                         closeTextSegment();
+                        finalizeUnifiedMessage();
                         const { bubble } = addMessage('ai', data, false, 'plain');
                         bubble.classList.add('stream-error');
                         return;
                     }
 
+                    // 处理工具调用请求
                     if (tryParseToolCallPayload(data)) {
                         closeTextSegment();
-                        addMessage('ai', data, false, 'tool-call');
+                        addToolCallToUnified(data);
                         return;
                     }
 
                     const trimmed = data.trimStart();
+                    
+                    // 处理「正在使用工具」状态（后端 [STATUS] 前缀与纯文本两种）
+                    if (trimmed.startsWith('[STATUS]')) {
+                        closeTextSegment();
+                        addThinkingToUnified(trimmed.replace(/^\[STATUS\]\s*/, '').trim());
+                        return;
+                    }
                     if (trimmed.startsWith('正在使用 ') && trimmed.includes('工具')) {
-                        appendStreamMetaLine(data.trim());
+                        closeTextSegment();
+                        addThinkingToUnified(data.trim());
+                        return;
+                    }
+                    
+                    // 工具执行结果（后端 [RESULT] 与旧版「工具执行结果:」）
+                    if (trimmed.startsWith('[RESULT]')) {
+                        closeTextSegment();
+                        const body = trimmed.replace(/^\[RESULT\]\s*/, '').trim();
+                        addToolResultToUnified(body);
                         return;
                     }
                     if (trimmed.startsWith('工具执行结果:')) {
+                        closeTextSegment();
                         const i = data.indexOf('工具执行结果:');
                         const body = data.slice(i + '工具执行结果:'.length).trim();
-                        appendToolResultBlock(body);
+                        addToolResultToUnified(body);
                         return;
                     }
 
+                    // 普通文本内容 - 添加到回答区域
                     streamCharAccum += data;
                     if (!streamCharBubble) {
-                        streamCharBubble = createStreamingAssistantBubble();
+                        streamCharBubble = getOrCreateAnswerSection();
                     }
                     scheduleMarkdownRefresh();
                 }
@@ -1249,6 +1498,7 @@
                 }
 
                 finalizeStreamText(true);
+                finalizeUnifiedMessage();
 
                 loadSessions();
 

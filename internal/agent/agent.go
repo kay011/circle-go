@@ -742,6 +742,12 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				// 目前我们假设用户总是批准工具调用
 			}
 
+			// 通知用户正在使用工具
+			toolStatusMsg := fmt.Sprintf("[STATUS] 正在使用 %s 工具...", functionCall.Name)
+			if cerr := callback(toolStatusMsg); cerr != nil {
+				return "", cerr
+			}
+
 			// 执行工具
 			toolStartTime := time.Now()
 			logger.Info("执行工具", map[string]interface{}{
@@ -766,6 +772,12 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				})
 			}
 
+			// 通知用户工具执行结果
+			toolResultMsg := fmt.Sprintf("[RESULT] %s", toolResult)
+			if cerr := callback(toolResultMsg); cerr != nil {
+				return "", cerr
+			}
+
 			// 将工具执行结果添加到对话历史
 			messages = append(messages, llm.Message{
 				Role:    "assistant",
@@ -783,16 +795,6 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 					"session_id": sessionID,
 					"memory_key": functionCall.Name,
 				})
-			}
-
-			// 通知用户正在使用工具
-			if cerr := callback(fmt.Sprintf("正在使用 %s 工具...", functionCall.Name)); cerr != nil {
-				return "", cerr
-			}
-
-			// 通知用户工具执行结果
-			if cerr := callback(fmt.Sprintf("工具执行结果: %s", toolResult)); cerr != nil {
-				return "", cerr
 			}
 
 			// 记录步骤耗时

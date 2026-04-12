@@ -58,6 +58,23 @@ func TestCalculatorTool(t *testing.T) {
 	}
 }
 
+func TestHTTPClientTool_Validation(t *testing.T) {
+	tool := tools.NewHTTPClientTool()
+	if tool.Name() != "http_client" {
+		t.Errorf("name: %s", tool.Name())
+	}
+	_, err := tool.Run(context.Background(), map[string]interface{}{})
+	if err == nil {
+		t.Fatal("expected error for missing url")
+	}
+	_, err = tool.Run(context.Background(), map[string]interface{}{
+		"url": "ftp://example.com",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-http(s) url")
+	}
+}
+
 func TestToolManager(t *testing.T) {
 	// 创建工具管理器
 	manager := tools.NewToolManager()

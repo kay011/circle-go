@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"circle-go/internal/utils"
+
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -23,16 +25,16 @@ type Message struct {
 
 // Tool 工具定义
 type Tool struct {
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
 	Parameters  ToolParameters `json:"parameters"`
 }
 
 // ToolParameters 工具参数
 type ToolParameters struct {
-	Type       string             `json:"type"`
+	Type       string              `json:"type"`
 	Properties map[string]Property `json:"properties"`
-	Required   []string           `json:"required,omitempty"`
+	Required   []string            `json:"required,omitempty"`
 }
 
 // Property 属性定义
@@ -47,12 +49,14 @@ type FunctionCall struct {
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
-// OpenAI LLM 实现
+// OpenAI LLM 实现（带重试和熔断）
 type OpenAI struct {
-	client  *openai.Client
-	model   string
-	maxTokens int
+	client      *openai.Client
+	model       string
+	maxTokens   int
 	temperature float32
+	retryConfig utils.RetryConfig
+	breaker     *utils.CircuitBreaker
 }
 
 // NewOpenAI 创建OpenAI LLM实例
@@ -62,15 +66,33 @@ func NewOpenAI(apiKey, model, baseURL string, maxTokens int, temperature float32
 		config.BaseURL = baseURL
 	}
 
+	// 创建断路器
+	breaker := utils.NewCircuitBreaker(utils.DefaultCircuitBreakerConfig)
+	breaker.SetStateChangeCallback(func(oldState, newState utils.CircuitState) {
+		fmt.Printf("[LLM Circuit Breaker] State changed: %s -> %s\n", oldState, newState)
+	})
+
 	return &OpenAI{
-		client:  openai.NewClientWithConfig(config),
-		model:   model,
-		maxTokens: maxTokens,
+		client:      openai.NewClientWithConfig(config),
+		model:       model,
+		maxTokens:   maxTokens,
 		temperature: temperature,
+		retryConfig: utils.DefaultRetryConfig,
+		breaker:     breaker,
 	}
 }
 
-// Chat 发送聊天请求
+// SetRetryConfig 设置重试配置
+func (o *OpenAI) SetRetryConfig(config utils.RetryConfig) {
+	o.retryConfig = config
+}
+
+// GetBreakerMetrics 获取断路器指标
+func (o *OpenAI) GetBreakerMetrics() utils.CircuitBreakerMetrics {
+	return o.breaker.GetMetrics()
+}
+
+// Chat 发送聊天请求（带重试和熔断）
 func (o *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
 	// 转换消息格式
 	openaiMessages := make([]openai.ChatCompletionMessage, len(messages))
@@ -81,22 +103,30 @@ func (o *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
 		}
 	}
 
-	// 发送请求
-	resp, err := o.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:       o.model,
-		Messages:    openaiMessages,
-		MaxTokens:   o.maxTokens,
-		Temperature: o.temperature,
+	var result string
+	err := o.breaker.Execute(func() error {
+		return utils.RetryWithBackoff(ctx, o.retryConfig, nil, func() error {
+			// 发送请求
+			resp, err := o.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+				Model:       o.model,
+				Messages:    openaiMessages,
+				MaxTokens:   o.maxTokens,
+				Temperature: o.temperature,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create chat completion: %w", err)
+			}
+
+			if len(resp.Choices) == 0 {
+				return fmt.Errorf("no choices returned")
+			}
+
+			result = resp.Choices[0].Message.Content
+			return nil
+		})
 	})
-	if err != nil {
-		return "", fmt.Errorf("failed to create chat completion: %w", err)
-	}
 
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no choices returned")
-	}
-
-	return resp.Choices[0].Message.Content, nil
+	return result, err
 }
 
 // ChatStream 流式发送聊天请求
@@ -140,7 +170,7 @@ func (o *OpenAI) ChatStream(ctx context.Context, messages []Message, callback fu
 	return nil
 }
 
-// FunctionCall 发送函数调用请求
+// FunctionCall 发送函数调用请求（带重试和熔断）
 func (o *OpenAI) FunctionCall(ctx context.Context, messages []Message, tools []Tool) (string, *FunctionCall, error) {
 	// 转换消息格式
 	openaiMessages := make([]openai.ChatCompletionMessage, len(messages))
@@ -173,37 +203,48 @@ func (o *OpenAI) FunctionCall(ctx context.Context, messages []Message, tools []T
 		}
 	}
 
-	// 发送请求
-	resp, err := o.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:       o.model,
-		Messages:    openaiMessages,
-		Tools:       openaiTools,
-		MaxTokens:   o.maxTokens,
-		Temperature: o.temperature,
+	var content string
+	var functionCall *FunctionCall
+
+	err := o.breaker.Execute(func() error {
+		return utils.RetryWithBackoff(ctx, o.retryConfig, nil, func() error {
+			// 发送请求
+			resp, err := o.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+				Model:       o.model,
+				Messages:    openaiMessages,
+				Tools:       openaiTools,
+				MaxTokens:   o.maxTokens,
+				Temperature: o.temperature,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create chat completion: %w", err)
+			}
+
+			if len(resp.Choices) == 0 {
+				return fmt.Errorf("no choices returned")
+			}
+
+			choice := resp.Choices[0]
+			if choice.Message.ToolCalls != nil && len(choice.Message.ToolCalls) > 0 {
+				// 函数调用
+				toolCall := choice.Message.ToolCalls[0]
+				arguments := make(map[string]interface{})
+				if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &arguments); err != nil {
+					return fmt.Errorf("failed to parse arguments: %w", err)
+				}
+
+				functionCall = &FunctionCall{
+					Name:      toolCall.Function.Name,
+					Arguments: arguments,
+				}
+				return nil
+			}
+
+			// 普通响应
+			content = choice.Message.Content
+			return nil
+		})
 	})
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create chat completion: %w", err)
-	}
 
-	if len(resp.Choices) == 0 {
-		return "", nil, fmt.Errorf("no choices returned")
-	}
-
-	choice := resp.Choices[0]
-	if choice.Message.ToolCalls != nil && len(choice.Message.ToolCalls) > 0 {
-		// 函数调用
-		toolCall := choice.Message.ToolCalls[0]
-		arguments := make(map[string]interface{})
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &arguments); err != nil {
-			return "", nil, fmt.Errorf("failed to parse arguments: %w", err)
-		}
-
-		return "", &FunctionCall{
-			Name:      toolCall.Function.Name,
-			Arguments: arguments,
-		}, nil
-	}
-
-	// 普通响应
-	return choice.Message.Content, nil, nil
+	return content, functionCall, err
 }

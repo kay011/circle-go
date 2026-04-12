@@ -664,19 +664,25 @@ func searxSearchHTML(ctx context.Context, client *http.Client, base, query strin
 	return out, nil
 }
 
-// 内置工具：文件操作
+// 内置工具：文件操作（带安全限制）
 func NewFileTool() Tool {
-	return &fileTool{}
+	return &fileTool{
+		allowedDir:  "./data",         // 默认允许的文件目录
+		maxFileSize: 10 * 1024 * 1024, // 最大文件大小 10MB
+	}
 }
 
-type fileTool struct{}
+type fileTool struct {
+	allowedDir  string
+	maxFileSize int64
+}
 
 func (t *fileTool) Name() string {
 	return "file_operation"
 }
 
 func (t *fileTool) Description() string {
-	return "读写文件操作"
+	return "读写文件操作（仅限 ./data 目录，防止路径遍历攻击）"
 }
 
 func (t *fileTool) Parameters() map[string]Property {
@@ -687,7 +693,7 @@ func (t *fileTool) Parameters() map[string]Property {
 		},
 		"file_path": {
 			Type:        "string",
-			Description: "文件路径",
+			Description: "文件路径（相对于 ./data 目录）",
 		},
 		"content": {
 			Type:        "string",
@@ -698,6 +704,27 @@ func (t *fileTool) Parameters() map[string]Property {
 
 func (t *fileTool) Required() []string {
 	return []string{"operation", "file_path"}
+}
+
+// validatePath 验证文件路径安全性
+func (t *fileTool) validatePath(filePath string) (string, error) {
+	// 解析为绝对路径
+	absPath, err := filepath.Abs(filepath.Join(t.allowedDir, filePath))
+	if err != nil {
+		return "", fmt.Errorf("invalid file path: %w", err)
+	}
+
+	// 确保路径在允许的目录内（防止路径遍历攻击）
+	allowedAbs, err := filepath.Abs(t.allowedDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve allowed directory: %w", err)
+	}
+
+	if !strings.HasPrefix(absPath, allowedAbs) {
+		return "", fmt.Errorf("access denied: path '%s' is outside allowed directory '%s'", filePath, t.allowedDir)
+	}
+
+	return absPath, nil
 }
 
 func (t *fileTool) Run(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -711,14 +738,29 @@ func (t *fileTool) Run(ctx context.Context, args map[string]interface{}) (string
 		return "", fmt.Errorf("invalid file_path type")
 	}
 
+	// 验证路径安全性
+	safePath, err := t.validatePath(filePath)
+	if err != nil {
+		return "", err
+	}
+
 	switch operation {
 	case "read":
 		// 读取文件
-		data, err := os.ReadFile(filePath)
+		data, err := os.ReadFile(safePath)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("file not found: %s", filePath)
+			}
 			return "", fmt.Errorf("failed to read file: %w", err)
 		}
-		return fmt.Sprintf("文件内容:\n%s", string(data)), nil
+
+		// 检查文件大小
+		if int64(len(data)) > t.maxFileSize {
+			return "", fmt.Errorf("file too large: %d bytes (max: %d bytes)", len(data), t.maxFileSize)
+		}
+
+		return fmt.Sprintf("文件内容 (%s):\n%s", filePath, string(data)), nil
 
 	case "write":
 		// 写入文件
@@ -727,19 +769,25 @@ func (t *fileTool) Run(ctx context.Context, args map[string]interface{}) (string
 			return "", fmt.Errorf("invalid content type")
 		}
 
+		// 检查内容大小
+		if int64(len(content)) > t.maxFileSize {
+			return "", fmt.Errorf("content too large: %d bytes (max: %d bytes)", len(content), t.maxFileSize)
+		}
+
 		// 确保目录存在
-		dir := filepath.Dir(filePath)
+		dir := filepath.Dir(safePath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return "", fmt.Errorf("failed to create directory: %w", err)
 		}
 
-		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		// 使用安全的文件权限（所有者可读写，其他用户只读）
+		if err := os.WriteFile(safePath, []byte(content), 0644); err != nil {
 			return "", fmt.Errorf("failed to write file: %w", err)
 		}
 
-		return "文件写入成功", nil
+		return fmt.Sprintf("文件写入成功: %s", filePath), nil
 
 	default:
-		return "", fmt.Errorf("unsupported operation: %s", operation)
+		return "", fmt.Errorf("unsupported operation: %s (supported: read, write)", operation)
 	}
 }

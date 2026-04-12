@@ -1,34 +1,68 @@
-# Server configuration
+# Circle-Go Agent 系统配置示例文件
+# 复制此文件为 config.yaml 并修改相应配置
+
+# 服务器配置
 server:
   host: 0.0.0.0
   port: 8080
+  read_timeout: 30s      # 读取超时
+  write_timeout: 60s     # 写入超时
+  idle_timeout: 120s     # 空闲连接超时
 
-# LLM configuration
+# LLM 配置
 llm:
-  api_key: "your-openai-api-key"
-  model: "gpt-4"
-  base_url: "https://api.openai.com/v1"
-  max_tokens: 1000
+  api_key: "your-api-key-here"  # ⚠️ 请替换为你的 API Key
+  model: "qwen3.5-plus"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  max_tokens: 2000
   temperature: 0.7
+  retry:
+    max_retries: 3       # 最大重试次数
+    base_delay: 1s       # 基础延迟
+    max_delay: 30s       # 最大延迟
+  circuit_breaker:
+    failure_threshold: 5    # 失败阈值
+    recovery_timeout: 60s   # 恢复超时
+    success_threshold: 3    # 成功阈值
 
-# Memory configuration
+# 记忆系统配置
 memory:
   short_term_size: 10
   long_term_path: "./memory"
+  compression_threshold: 0.8  # 压缩触发阈值（80%）
+  session_ttl: 24h            # 会话存活时间
 
-# MCP configuration
-mcp:
-  enabled: false
-  url: "http://localhost:8000"
+# 速率限制配置
+rate_limit:
+  enabled: true
+  requests_per_minute: 60   # 每分钟请求数
+  burst_size: 10            # 突发容量
 
-# 搜索（web_search 工具：零 API Key，DuckDuckGo + SearxNG 聚合）
-# 若留空则使用内置公共 Searx 实例列表；建议自行维护可用实例根 URL（HTTPS，无末尾斜杠也可）
+# 文件操作配置
+file_tool:
+  allowed_directory: "./data"  # 允许的文件目录
+  max_file_size: 10485760      # 最大文件大小（10MB）
+
+# 搜索配置
 search:
   searx_instances:
     - "https://searx.tiekoetter.com"
     - "https://searx.be"
+    - "https://paulgo.io"
+    - "https://search.mdosch.de"
 
-# Usage:
-# 1. Copy this file to config.yaml
-# 2. Replace "your-openai-api-key" with your actual OpenAI API key
-# 3. Adjust other settings as needed
+# MCP 配置
+mcp:
+  enabled: false
+  url: "http://localhost:8000"
+
+# 日志配置
+logging:
+  level: "info"          # debug, info, warn, error
+  format: "json"         # json, text
+  output: "stdout"       # stdout, file
+
+# 监控配置
+metrics:
+  enabled: true
+  path: "/metrics"

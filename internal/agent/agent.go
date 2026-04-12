@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"circle-go/internal/llm"
 	"circle-go/internal/logging"
 	"circle-go/internal/memory"
+	"circle-go/internal/planner"
 	"circle-go/internal/tools"
 )
 
@@ -218,11 +220,13 @@ type ToolCall struct {
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
-// Agent 智能体
+// Agent 智能体（支持任务规划和自我反思）
 type Agent struct {
 	llm             llm.LLM
 	toolManager     *tools.ToolManager
 	memoryManager   *memory.MemoryManager
+	taskPlanner     *planner.Planner
+	reflector       *Reflector
 	maxSteps        int
 	toolCallHistory []ToolCall
 	humanInTheLoop  bool
@@ -238,14 +242,32 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 	// 预先转换工具列表为 LLM 工具格式
 	llmTools := prepareLLMTools(toolManager)
 
+	// 创建任务规划器
+	taskPlanner := planner.NewPlanner(llm)
+
+	// 创建反思器
+	reflector := NewReflector(llm)
+
 	return &Agent{
 		llm:             llm,
 		toolManager:     toolManager,
+		taskPlanner:     taskPlanner,
+		reflector:       reflector,
 		maxSteps:        maxSteps,
 		toolCallHistory: []ToolCall{},
 		humanInTheLoop:  humanInTheLoop,
 		llmTools:        llmTools,
 	}
+}
+
+// GetPlanner 获取任务规划器
+func (a *Agent) GetPlanner() *planner.Planner {
+	return a.taskPlanner
+}
+
+// GetReflector 获取反思器
+func (a *Agent) GetReflector() *Reflector {
+	return a.reflector
 }
 
 // prepareLLMTools 准备 LLM 工具列表
@@ -810,4 +832,132 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 		return "", cerr
 	}
 	return msg, nil
+}
+
+// RunWithPlanning 使用任务规划运行Agent（适合复杂任务）
+func (a *Agent) RunWithPlanning(ctx context.Context, sessionID, userInput string) (string, error) {
+	logger := logging.NewLogger(logging.INFO, "Agent.Planner")
+	logger.Info("开始任务规划", map[string]interface{}{
+		"session_id": sessionID,
+		"user_input": userInput,
+	})
+
+	// 1. 分解任务
+	plan, err := a.taskPlanner.DecomposeGoal(ctx, userInput)
+	if err != nil {
+		logger.Warn("任务分解失败", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// fallback 到普通模式
+		return a.Run(ctx, sessionID, userInput)
+	}
+
+	logger.Info("任务分解完成", map[string]interface{}{
+		"task_count": len(plan.Tasks),
+	})
+
+	// 2. 显示任务计划
+	planDisplay := a.taskPlanner.FormatPlanForDisplay(plan)
+	logger.Info("任务计划", map[string]interface{}{
+		"plan": planDisplay,
+	})
+
+	// 3. 执行任务
+	var results []string
+	for {
+		// 获取下一个可执行任务
+		task := a.taskPlanner.GetNextTask(plan)
+		if task == nil {
+			break // 没有更多任务
+		}
+
+		// 更新任务状态为进行中
+		a.taskPlanner.UpdateTaskStatus(plan, task.ID, planner.TaskInProgress, "", "")
+
+		logger.Info("执行任务", map[string]interface{}{
+			"task_id":     task.ID,
+			"description": task.Description,
+		})
+
+		// 构建任务提示
+		taskPrompt := fmt.Sprintf("当前任务：%s\n目标：%s", task.Description, plan.Goal)
+		if len(results) > 0 {
+			taskPrompt += fmt.Sprintf("\n之前任务的结果：\n%s", strings.Join(results, "\n"))
+		}
+
+		// 执行任务
+		result, err := a.Run(ctx, sessionID, taskPrompt)
+		if err != nil {
+			a.taskPlanner.UpdateTaskStatus(plan, task.ID, planner.TaskFailed, "", err.Error())
+			logger.Warn("任务执行失败", map[string]interface{}{
+				"task_id": task.ID,
+				"error":   err.Error(),
+			})
+			continue
+		}
+
+		// 🔄 自我反思：评估任务执行效果
+		if a.reflector != nil {
+			reflection, reflectErr := a.reflector.ReflectOnAction(ctx, plan.Goal, task.Description, result)
+			if reflectErr == nil {
+				logger.Info("任务反思", map[string]interface{}{
+					"task_id":      task.ID,
+					"score":        reflection.Score,
+					"is_effective": reflection.IsEffective,
+				})
+
+				// 如果效果很差，记录建议
+				if reflection.Score <= 4 && len(reflection.Suggestions) > 0 {
+					logger.Info("改进建议", map[string]interface{}{
+						"task_id":     task.ID,
+						"suggestions": reflection.Suggestions,
+					})
+				}
+			}
+		}
+
+		// 更新任务状态为完成
+		a.taskPlanner.UpdateTaskStatus(plan, task.ID, planner.TaskCompleted, result, "")
+		results = append(results, fmt.Sprintf("%s: %s", task.Description, result))
+
+		logger.Info("任务完成", map[string]interface{}{
+			"task_id": task.ID,
+		})
+	}
+
+	// 4. 🔄 整体反思：评估整个任务计划
+	var reflectionSummary string
+	if a.reflector != nil && len(plan.Tasks) > 0 {
+		completedTasks := make([]CompletedTask, 0)
+		for _, task := range plan.Tasks {
+			completedTasks = append(completedTasks, CompletedTask{
+				Description: task.Description,
+				Status:      string(task.Status),
+				Result:      task.Result,
+				Error:       task.Error,
+			})
+		}
+
+		planReflection, err := a.reflector.ReflectOnPlan(ctx, plan.Goal, completedTasks)
+		if err == nil {
+			reflectionSummary = "\n\n📊 整体评估:\n" + a.reflector.GetImprovementSuggestions(planReflection)
+			logger.Info("计划整体反思", map[string]interface{}{
+				"score": planReflection.Score,
+			})
+		}
+	}
+
+	// 5. 汇总结果
+	completed, total, percentage := a.taskPlanner.GetProgress(plan)
+	summary := fmt.Sprintf("✅ 任务完成！进度：%d/%d (%.0f%%)\n\n", completed, total, percentage)
+	summary += a.taskPlanner.FormatPlanForDisplay(plan)
+	summary += reflectionSummary
+
+	logger.Info("所有任务完成", map[string]interface{}{
+		"completed":  completed,
+		"total":      total,
+		"percentage": percentage,
+	})
+
+	return summary, nil
 }

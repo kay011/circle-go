@@ -22,8 +22,10 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// 创建API服务器
-	server := api.NewServer(cfg)
+	server, err := api.NewServer(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create server: %v", err)
+	}
 
 	// 启动服务器
 	go func() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"circle-go/internal/llm"
@@ -12,8 +13,8 @@ import (
 	"circle-go/internal/tools"
 )
 
-// SystemPrompt 系统提示词
-const SystemPrompt = `# 角色定位
+// BuiltInSystemPrompt 内置系统提示词（agents 配置未指定 system_prompt 时使用）
+const BuiltInSystemPrompt = `# 角色定位
 你是由开发者创建的AI智能助手，致力于成为用户可靠、温暖、有用的伙伴。
 
 # 核心特质
@@ -218,39 +219,63 @@ type ToolCall struct {
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
-// Agent 智能体
+// Agent 智能体（每个实例对应一种 Spec：提示词、模式、工具子集等）
 type Agent struct {
 	llm             llm.LLM
 	toolManager     *tools.ToolManager
 	memoryManager   *memory.MemoryManager
-	maxSteps        int
+	spec            Spec
+	systemPrompt    string
 	toolCallHistory []ToolCall
-	humanInTheLoop  bool
-	llmTools        []llm.Tool // 预先转换好的 LLM 工具列表
+	llmTools        []llm.Tool // 按 Spec 过滤后的 LLM 工具列表
 }
 
-// NewAgent 创建Agent实例
-func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanInTheLoop bool) *Agent {
-	if maxSteps <= 0 {
-		maxSteps = 5
+// NewAgent 使用给定 Spec 创建智能体（spec 为零值时等价于 DefaultSpec）
+func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, spec Spec) (*Agent, error) {
+	if spec.ID == "" && spec.ExecutionMode == "" && spec.MaxSteps == 0 && spec.DisplayName == "" &&
+		spec.SystemPrompt == "" && spec.SystemPromptFile == "" && len(spec.Tools) == 0 {
+		spec = DefaultSpec()
 	}
-
-	// 预先转换工具列表为 LLM 工具格式
-	llmTools := prepareLLMTools(toolManager)
-
+	if err := spec.Normalize(); err != nil {
+		return nil, err
+	}
+	sys, err := spec.ResolveSystemPrompt()
+	if err != nil {
+		return nil, err
+	}
+	llmTools := prepareLLMToolsFiltered(toolManager, spec.Tools)
 	return &Agent{
 		llm:             llm,
 		toolManager:     toolManager,
-		maxSteps:        maxSteps,
+		spec:            spec,
+		systemPrompt:    sys,
 		toolCallHistory: []ToolCall{},
-		humanInTheLoop:  humanInTheLoop,
 		llmTools:        llmTools,
-	}
+	}, nil
 }
 
-// prepareLLMTools 准备 LLM 工具列表
-func prepareLLMTools(toolManager *tools.ToolManager) []llm.Tool {
+func prepareLLMToolsFiltered(toolManager *tools.ToolManager, allow []string) []llm.Tool {
 	toolsList := toolManager.List()
+	if len(allow) == 0 {
+		return prepareLLMToolsFromList(toolsList)
+	}
+	allowed := make(map[string]struct{}, len(allow))
+	for _, n := range allow {
+		n = strings.TrimSpace(n)
+		if n != "" {
+			allowed[n] = struct{}{}
+		}
+	}
+	var filtered []tools.Tool
+	for _, t := range toolsList {
+		if _, ok := allowed[t.Name()]; ok {
+			filtered = append(filtered, t)
+		}
+	}
+	return prepareLLMToolsFromList(filtered)
+}
+
+func prepareLLMToolsFromList(toolsList []tools.Tool) []llm.Tool {
 	llmTools := make([]llm.Tool, len(toolsList))
 	for i, tool := range toolsList {
 		params := tool.Parameters()
@@ -275,14 +300,14 @@ func prepareLLMTools(toolManager *tools.ToolManager) []llm.Tool {
 	return llmTools
 }
 
+// Spec 返回当前智能体配置（只读副本）
+func (a *Agent) Spec() Spec {
+	return a.spec
+}
+
 // SetMemoryManager 设置记忆管理器
 func (a *Agent) SetMemoryManager(memoryManager *memory.MemoryManager) {
 	a.memoryManager = memoryManager
-}
-
-// SetHumanInTheLoop 设置是否启用 human-in-the-loop
-func (a *Agent) SetHumanInTheLoop(humanInTheLoop bool) {
-	a.humanInTheLoop = humanInTheLoop
 }
 
 // isToolCallDuplicate 检查工具调用是否重复
@@ -331,6 +356,10 @@ func streamResponse(response string, callback func(chunk string) error) error {
 
 // Run 运行Agent
 func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, error) {
+	if a.spec.ExecutionMode == ModePlanExecute {
+		return a.runPlanExecute(ctx, sessionID, userInput)
+	}
+
 	// 重置工具调用历史
 	a.toolCallHistory = []ToolCall{}
 
@@ -339,6 +368,8 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 	logger.Info("开始处理用户请求", map[string]interface{}{
 		"session_id": sessionID,
 		"user_input": userInput,
+		"agent_id":   a.spec.ID,
+		"mode":       a.spec.ExecutionMode,
 	})
 
 	// 增加 Agent 调用计数
@@ -346,52 +377,13 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 	startTime := time.Now()
 
 	// 初始化对话历史
-	messages := []llm.Message{
-		{
-			Role:    "system",
-			Content: SystemPrompt,
-		},
-	}
-
-	// 添加完整的对话历史（如果有）
-	if a.memoryManager != nil {
-		session := a.memoryManager.GetSession(sessionID)
-		if session != nil && len(session.ShortTerm) > 0 {
-			// 添加短期记忆中的历史消息
-			for _, msg := range session.ShortTerm {
-				messages = append(messages, llm.Message{
-					Role:    msg.Role,
-					Content: msg.Content,
-				})
-			}
-			logger.Info("加载对话历史", map[string]interface{}{
-				"session_id":    sessionID,
-				"history_count": len(session.ShortTerm),
-			})
-		} else {
-			// 如果没有短期记忆，尝试使用记忆摘要
-			summary := a.memoryManager.SummarizeMemory(sessionID)
-			if summary != "" {
-				messages = append(messages, llm.Message{
-					Role:    "system",
-					Content: summary,
-				})
-			}
-		}
-	}
-
-	if a.shouldAppendUserMessage(sessionID, userInput) {
-		messages = append(messages, llm.Message{
-			Role:    "user",
-			Content: userInput,
-		})
-	}
+	messages := a.buildBaseMessages(sessionID, userInput, logger)
 
 	// ReAct循环
-	for step := 0; step < a.maxSteps; step++ {
+	for step := 0; step < a.spec.MaxSteps; step++ {
 		logger.Info("执行ReAct步骤", map[string]interface{}{
 			"step":       step,
-			"max_steps":  a.maxSteps,
+			"max_steps":  a.spec.MaxSteps,
 			"session_id": sessionID,
 		})
 
@@ -528,78 +520,33 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 
 // RunStream 流式运行Agent。finalReply 为写入对话历史用的助手最终文本（与同步 Run 存库的语义一致）；callback 写失败时返回错误。
 func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, callback func(chunk string) error) (finalReply string, err error) {
-	// 开始时间
-	startTime := time.Now()
+	if a.spec.ExecutionMode == ModePlanExecute {
+		return a.runPlanExecuteStream(ctx, sessionID, userInput, callback)
+	}
 
-	// 重置工具调用历史
+	startTime := time.Now()
 	a.toolCallHistory = []ToolCall{}
 
-	// 初始化对话历史
-	messages := []llm.Message{
-		{
-			Role:    "system",
-			Content: SystemPrompt,
-		},
-	}
-
-	// 添加完整的对话历史（如果有）
+	logger := logging.NewLogger(logging.INFO, "Agent")
 	memoryStartTime := time.Now()
-	if a.memoryManager != nil {
-		session := a.memoryManager.GetSession(sessionID)
-		if session != nil && len(session.ShortTerm) > 0 {
-			// 添加短期记忆中的历史消息
-			for _, msg := range session.ShortTerm {
-				messages = append(messages, llm.Message{
-					Role:    msg.Role,
-					Content: msg.Content,
-				})
-			}
-		} else {
-			// 如果没有短期记忆，尝试使用记忆摘要
-			summary := a.memoryManager.SummarizeMemory(sessionID)
-			if summary != "" {
-				messages = append(messages, llm.Message{
-					Role:    "system",
-					Content: summary,
-				})
-			}
-		}
-	}
+	messages := a.buildBaseMessages(sessionID, userInput, logger)
 	memoryDuration := time.Since(memoryStartTime)
 
-	if a.shouldAppendUserMessage(sessionID, userInput) {
-		messages = append(messages, llm.Message{
-			Role:    "user",
-			Content: userInput,
-		})
-	}
-
-	// 初始化日志记录器
-	logger := logging.NewLogger(logging.INFO, "Agent")
 	logger.Info("开始处理用户请求", map[string]interface{}{
 		"session_id":  sessionID,
 		"user_input":  userInput,
+		"agent_id":    a.spec.ID,
+		"mode":        a.spec.ExecutionMode,
 		"init_time":   time.Since(startTime).Milliseconds(),
 		"memory_time": memoryDuration.Milliseconds(),
 	})
 
-	// 记录加载的历史消息数量
-	if a.memoryManager != nil {
-		session := a.memoryManager.GetSession(sessionID)
-		if session != nil && len(session.ShortTerm) > 0 {
-			logger.Info("加载对话历史", map[string]interface{}{
-				"session_id":    sessionID,
-				"history_count": len(session.ShortTerm),
-			})
-		}
-	}
-
 	// ReAct循环
-	for step := 0; step < a.maxSteps; step++ {
+	for step := 0; step < a.spec.MaxSteps; step++ {
 		stepStartTime := time.Now()
 		logger.Info("执行ReAct步骤", map[string]interface{}{
 			"step":      step,
-			"max_steps": a.maxSteps,
+			"max_steps": a.spec.MaxSteps,
 		})
 
 		// 发送请求
@@ -673,9 +620,9 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 
 			// 检查是否启用了 human-in-the-loop
 			logger.Info("检查 human-in-the-loop 设置", map[string]interface{}{
-				"human_in_the_loop": a.humanInTheLoop,
+				"human_in_the_loop": a.spec.HumanInTheLoop,
 			})
-			if a.humanInTheLoop {
+			if a.spec.HumanInTheLoop {
 				// 生成工具调用请求
 				toolCallRequest := ToolCallRequest{
 					ID:        fmt.Sprintf("toolcall_%d", time.Now().UnixNano()),

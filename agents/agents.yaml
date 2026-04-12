@@ -1,0 +1,23 @@
+# 多智能体定义（工业级：模式、工具子集、提示词可配）
+# default_agent 必须对应下方 agents 中某一 id
+
+default_agent: default
+
+agents:
+  - id: default
+    name: 通用助手（ReAct）
+    execution_mode: react
+    max_steps: 12
+    human_in_the_loop: false
+    system_prompt: ""
+    system_prompt_file: ""
+    tools: []
+
+  - id: planner
+    name: 规划执行（Plan-Execute）
+    execution_mode: plan_execute
+    max_steps: 14
+    human_in_the_loop: false
+    system_prompt: |
+      你是严谨的任务执行助手。优先理解用户目标，再分步使用工具获取事实，最后给出简洁结论。
+    tools: []

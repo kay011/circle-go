@@ -531,6 +531,10 @@
             min-height: 0;
         }
 
+        .aux-inline-wrap {
+            flex-shrink: 0;
+        }
+
         .aux-chain {
             border-radius: 12px;
             background: rgba(120, 120, 128, 0.06);
@@ -1085,88 +1089,6 @@
             margin-right: 2px;
         }
 
-        /* 用户头像与下拉（浅色顶栏） */
-        .user-menu {
-            position: relative;
-        }
-
-        .user-avatar-btn {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            border: 0.33px solid rgba(13, 148, 136, 0.35);
-            background: linear-gradient(160deg, #ecfdf5 0%, #ccfbf1 40%, #99f6e4 100%);
-            color: #0f766e;
-            font-weight: 600;
-            font-size: 13px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: transform 0.12s ease, opacity 0.12s;
-            touch-action: manipulation;
-            -webkit-tap-highlight-color: transparent;
-        }
-
-        @media (hover: hover) {
-            .user-avatar-btn:hover {
-                transform: scale(1.06);
-                box-shadow: 0 2px 10px rgba(13, 148, 136, 0.18);
-            }
-        }
-
-        .user-avatar-btn:active {
-            transform: scale(0.94);
-            opacity: 0.88;
-        }
-
-        .user-avatar-btn:focus-visible {
-            outline: 2px solid var(--primary-color);
-            outline-offset: 2px;
-        }
-
-        .user-dropdown {
-            position: absolute;
-            top: calc(100% + 10px);
-            right: 0;
-            min-width: 200px;
-            background: #fff;
-            border-radius: 12px;
-            box-shadow: 0 12px 40px rgba(15, 23, 42, 0.15), 0 2px 8px rgba(15, 23, 42, 0.08);
-            border: 1px solid rgba(15, 23, 42, 0.08);
-            padding: 10px 0;
-            z-index: 2000;
-        }
-
-        .user-dropdown[hidden] {
-            display: none !important;
-        }
-
-        .user-dropdown-name {
-            padding: 6px 16px 10px;
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-primary);
-            border-bottom: 1px solid var(--border-color);
-            word-break: break-all;
-        }
-
-        .user-dropdown-logout {
-            width: 100%;
-            padding: 10px 16px;
-            border: none;
-            background: none;
-            text-align: left;
-            font-size: 14px;
-            color: #b91c1c;
-            cursor: pointer;
-            font-family: inherit;
-            transition: background 0.15s;
-        }
-
-        .user-dropdown-logout:hover {
-            background: rgba(185, 28, 28, 0.06);
-        }
     </style>
 </head>
 <body>
@@ -1200,17 +1122,7 @@
                 <div class="header-center">
                     <h1 class="header-product">Circle</h1>
                 </div>
-                <div class="header-end">
-                    <div class="user-menu" id="userMenu">
-                        <button type="button" class="user-avatar-btn" id="userAvatarBtn" title="账户" aria-expanded="false" aria-haspopup="true">
-                            <span class="user-avatar-letter" id="userAvatarLetter">?</span>
-                        </button>
-                        <div class="user-dropdown" id="userDropdown" hidden role="menu">
-                            <div class="user-dropdown-name" id="userDropdownName"></div>
-                            <button type="button" class="user-dropdown-logout" id="logoutBtn" role="menuitem">退出登录</button>
-                        </div>
-                    </div>
-                </div>
+                <div class="header-end"></div>
             </div>
         </header>
 
@@ -1269,7 +1181,6 @@
     </div>
     </div>
 
-    <script src="auth.js"></script>
     <script>
         let currentSessionId = generateSessionId();
         let isStreaming = false;
@@ -1282,38 +1193,10 @@
         const sidebarEl = document.getElementById('sidebar');
         const sidebarBackdropEl = document.getElementById('sidebarBackdrop');
         const sidebarHistoryListEl = document.getElementById('sidebarHistoryList');
-        const userDropdownEl = document.getElementById('userDropdown');
-        const userAvatarBtnEl = document.getElementById('userAvatarBtn');
-
         /** 本轮流式：同一 AI 气泡内「工具区 + 正文区」 */
         let streamCombinedCtx = null;
 
-        let authRedirectSuppressed = false;
-
-        function avatarLetter(username) {
-            if (!username || !String(username).trim()) return '?';
-            return String(username).trim()[0].toUpperCase();
-        }
-
-        function updateUserUI(username) {
-            document.getElementById('userAvatarLetter').textContent = avatarLetter(username);
-            document.getElementById('userDropdownName').textContent = username || '';
-        }
-
-        function closeUserDropdown() {
-            userDropdownEl.hidden = true;
-            userAvatarBtnEl.setAttribute('aria-expanded', 'false');
-        }
-
-        function toggleUserDropdown() {
-            closeSidebar();
-            const open = userDropdownEl.hidden;
-            userDropdownEl.hidden = !open;
-            userAvatarBtnEl.setAttribute('aria-expanded', open ? 'true' : 'false');
-        }
-
         function openSidebar() {
-            closeUserDropdown();
             sidebarEl.classList.add('open');
             sidebarBackdropEl.hidden = false;
             sidebarEl.setAttribute('aria-hidden', 'false');
@@ -1325,58 +1208,13 @@
             sidebarEl.setAttribute('aria-hidden', 'true');
         }
 
-        async function authFetch(url, opts) {
+        async function apiFetch(url, opts) {
             const o = opts || {};
             const headers = new Headers(o.headers || {});
-            const t = Auth.getToken();
-            if (t) headers.set('Authorization', 'Bearer ' + t);
             if (o.body && typeof o.body === 'string' && !headers.has('Content-Type')) {
                 headers.set('Content-Type', 'application/json');
             }
-            const res = await fetch(url, Object.assign({}, o, { headers }));
-            if (res.status === 401 && !authRedirectSuppressed) {
-                Auth.clearAuth();
-                closeUserDropdown();
-                window.location.replace('login.html');
-            }
-            return res;
-        }
-
-        async function bootstrapAuth() {
-            const token = Auth.getToken();
-            const savedName = Auth.getSavedUsername();
-            if (!token) {
-                window.location.replace('login.html');
-                return false;
-            }
-            try {
-                const res = await fetch('/api/auth/me', {
-                    headers: { Authorization: 'Bearer ' + token }
-                });
-                if (!res.ok) throw new Error('unauthorized');
-                const data = await res.json();
-                const name = data.username || savedName || '';
-                updateUserUI(name);
-                refreshSidebarHistory();
-                return true;
-            } catch (e) {
-                Auth.clearAuth();
-                window.location.replace('login.html');
-                return false;
-            }
-        }
-
-        async function logout() {
-            authRedirectSuppressed = true;
-            try {
-                await authFetch('/api/auth/logout', { method: 'POST' });
-            } catch (e) {
-                /* ignore */
-            }
-            authRedirectSuppressed = false;
-            Auth.clearAuth();
-            closeUserDropdown();
-            window.location.replace('login.html');
+            return fetch(url, Object.assign({}, o, { headers }));
         }
 
         // 生成会话ID
@@ -1451,7 +1289,8 @@
             }
         }
 
-        function renderMarkdownToBubble(bubble, text) {
+        function renderMarkdownToBubble(bubble, text, opts) {
+            opts = opts || {};
             if (!bubble) return;
             bubble.classList.add('markdown-content');
             try {
@@ -1463,7 +1302,9 @@
             } catch (e) {
                 bubble.textContent = text || '';
             }
-            highlightCodeIn(bubble);
+            if (!opts.skipCodeHighlight) {
+                highlightCodeIn(bubble);
+            }
         }
 
         /** 按 SSE 规范用 \n\n 分隔事件，拼接同事件内多行 data: */
@@ -1534,7 +1375,8 @@
                 auxWrap: null,
                 detailsEl: null,
                 bodyEl: null,
-                statusEl: null
+                statusEl: null,
+                titleMainEl: null
             };
             scrollToBottom();
             return streamCombinedCtx;
@@ -1549,7 +1391,7 @@
             details.className = 'aux-chain';
             details.open = false;
             const summary = document.createElement('summary');
-            summary.innerHTML = '<span class="aux-title"><i class="fas fa-ellipsis-h"></i><span>思考中 · Exploring</span></span><span class="aux-status">···</span>';
+            summary.innerHTML = '<span class="aux-title"><i class="fas fa-ellipsis-h"></i><span class="aux-title-main">思考中 · Exploring</span></span><span class="aux-status">···</span>';
             const body = document.createElement('div');
             body.className = 'aux-chain-body';
             details.appendChild(summary);
@@ -1557,10 +1399,12 @@
             auxWrap.appendChild(details);
             ctx.outerBubble.insertBefore(auxWrap, ctx.mainEl);
             const statusEl = summary.querySelector('.aux-status');
+            const titleMainEl = summary.querySelector('.aux-title-main');
             ctx.auxWrap = auxWrap;
             ctx.detailsEl = details;
             ctx.bodyEl = body;
             ctx.statusEl = statusEl;
+            ctx.titleMainEl = titleMainEl;
             scrollToBottom();
             return ctx;
         }
@@ -1617,9 +1461,12 @@
         function finalizeStreamAuxPanel() {
             if (!streamCombinedCtx || !streamCombinedCtx.auxWrap) return;
             const ctx = streamCombinedCtx;
-            const { detailsEl, statusEl } = ctx;
+            const { detailsEl, statusEl, titleMainEl } = ctx;
             if (statusEl) {
                 statusEl.textContent = '';
+            }
+            if (titleMainEl) {
+                titleMainEl.textContent = '工具过程 · Done';
             }
             detailsEl.open = false;
             detailsEl.classList.add('aux-chain--done');
@@ -1762,7 +1609,7 @@
 
             try {
                 // 发送请求到后端
-                const response = await authFetch('/api/chat/stream', {
+                const response = await apiFetch('/api/chat/stream', {
                     method: 'POST',
                     body: JSON.stringify({
                         session_id: currentSessionId,
@@ -1782,12 +1629,12 @@
                 let sseBuffer = '';
                 let streamCharBubble = null;
                 let streamCharAccum = '';
-                let mdThrottle = null;
+                let mdStreamRaf = null;
 
                 function finalizeStreamText(removeStreamingClass) {
-                    if (mdThrottle) {
-                        clearTimeout(mdThrottle);
-                        mdThrottle = null;
+                    if (mdStreamRaf != null) {
+                        cancelAnimationFrame(mdStreamRaf);
+                        mdStreamRaf = null;
                     }
                     if (streamCharBubble && streamCharAccum !== '') {
                         renderMarkdownToBubble(streamCharBubble, streamCharAccum);
@@ -1808,14 +1655,14 @@
                 }
 
                 function scheduleMarkdownRefresh() {
-                    if (mdThrottle) return;
-                    mdThrottle = setTimeout(() => {
-                        mdThrottle = null;
+                    if (mdStreamRaf != null) return;
+                    mdStreamRaf = requestAnimationFrame(function () {
+                        mdStreamRaf = null;
                         if (streamCharBubble) {
-                            renderMarkdownToBubble(streamCharBubble, streamCharAccum);
+                            renderMarkdownToBubble(streamCharBubble, streamCharAccum, { skipCodeHighlight: true });
                             scrollToBottom();
                         }
-                    }, 100);
+                    });
                 }
 
                 function handleStreamPayload(data) {
@@ -1936,7 +1783,7 @@
 
         // 侧边栏：加载会话列表并高亮当前会话
         function refreshSidebarHistory() {
-            authFetch('/api/sessions')
+            apiFetch('/api/sessions')
                 .then(response => {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();
@@ -1971,7 +1818,7 @@
         async function loadSessionHistory(sessionId) {
             if (!sessionId || sessionId === 'new') return;
             try {
-                const res = await authFetch('/api/sessions/' + encodeURIComponent(sessionId));
+                const res = await apiFetch('/api/sessions/' + encodeURIComponent(sessionId));
                 if (res.status === 404) {
                     throw new Error('会话不存在或已过期');
                 }
@@ -2006,25 +1853,9 @@
             closeSidebar();
         });
 
-        document.getElementById('userAvatarBtn').addEventListener('click', function(e) {
-            e.stopPropagation();
-            toggleUserDropdown();
-        });
-        document.getElementById('logoutBtn').addEventListener('click', function(e) {
-            e.stopPropagation();
-            logout();
-        });
-        document.addEventListener('click', function() {
-            closeUserDropdown();
-        });
-        document.getElementById('userMenu').addEventListener('click', function(e) {
-            e.stopPropagation();
-        });
-
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeSidebar();
-                closeUserDropdown();
             }
         });
 
@@ -2040,12 +1871,10 @@
         `;
         document.head.appendChild(style);
 
-        // 初始化（须先通过 bootstrapAuth，否则已跳转登录页）
         window.onload = async function() {
-            const ok = await bootstrapAuth();
-            if (!ok) return;
             configureMarked();
             messageInput.focus();
+            refreshSidebarHistory();
             showNotification('欢迎使用 Circle');
         };
     </script>

@@ -6,6 +6,10 @@ import (
 	"fmt"
 
 	"github.com/sashabaranov/go-openai"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // LLM 大语言模型接口
@@ -142,6 +146,15 @@ func (o *OpenAI) ChatStream(ctx context.Context, messages []Message, callback fu
 
 // FunctionCall 发送函数调用请求
 func (o *OpenAI) FunctionCall(ctx context.Context, messages []Message, tools []Tool) (string, *FunctionCall, error) {
+	ctx, span := otel.Tracer("llm").Start(ctx, "OpenAI.FunctionCall",
+		trace.WithAttributes(
+			attribute.String("llm.model", o.model),
+			attribute.Int("llm.messages", len(messages)),
+			attribute.Int("llm.tools", len(tools)),
+		),
+	)
+	defer span.End()
+
 	// 转换消息格式
 	openaiMessages := make([]openai.ChatCompletionMessage, len(messages))
 	for i, msg := range messages {
@@ -182,6 +195,8 @@ func (o *OpenAI) FunctionCall(ctx context.Context, messages []Message, tools []T
 		Temperature: o.temperature,
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", nil, fmt.Errorf("failed to create chat completion: %w", err)
 	}
 

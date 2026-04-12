@@ -13,8 +13,32 @@ llm:
 
 # Memory configuration
 memory:
-  short_term_size: 10
+  short_term_size: 24
   long_term_path: "./memory"
+  compress_min_messages: 10
+  compress_trigger_ratio: 0.75
+  long_term_max_items: 120
+  context_injection_k: 8
+  # long_term_mode: file（默认，仅 JSON）| vector（JSON + 本地向量文件，语义检索需有效 api_key）
+  long_term_mode: "file"
+  embedding_model: "text-embedding-3-small"
+  redis:
+    enabled: false
+    addr: "127.0.0.1:6379"
+    password: ""
+    db: 0
+    key_prefix: "circle:"
+
+# OTLP 追踪（可对接 Langfuse / Jaeger / Grafana Tempo；Langfuse 见官方 OTLP endpoint 文档）
+observability:
+  enabled: false
+  otlp_endpoint: "http://localhost:4318/v1/traces"
+  service_name: "circle-go"
+  insecure: true
+
+# 多智能体 YAML（execution_mode: react | plan_execute）
+agents:
+  definitions_file: "agents/agents.yaml"
 
 # MCP configuration
 mcp:

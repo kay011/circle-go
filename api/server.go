@@ -5,18 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"circle-go/config"
 	"circle-go/internal/agent"
-	"circle-go/internal/auth"
+	"circle-go/internal/agents"
 	"circle-go/internal/llm"
 	"circle-go/internal/logging"
 	"circle-go/internal/mcp"
 	"circle-go/internal/memory"
+	"circle-go/internal/observability"
 	"circle-go/internal/tools"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // writeSSEData 按 SSE 规范写入文本：拆成多行 data:，由浏览器拼成完整 payload，避免单行 data 内含换行导致前端只收到首行。
@@ -37,18 +40,26 @@ type Server struct {
 	llm           llm.LLM
 	toolManager   *tools.ToolManager
 	memoryManager *memory.MemoryManager
-	authManager   *auth.AuthManager
 	logger        *logging.Logger
-	agent         *agent.Agent
-	mcpClient     *mcp.MCPClient
-	server        *http.Server
-
-	sessionMu     sync.RWMutex
-	sessionTokens map[string]string // token -> username，用于 /me 与登出
+	agentByID     map[string]*agent.Agent
+	defaultAgentID string
+	mcpClient      *mcp.MCPClient
+	server         *http.Server
+	obsShutdown    func(context.Context) error
 }
 
 // NewServer 创建API服务器
-func NewServer(cfg *config.Config) *Server {
+func NewServer(cfg *config.Config) (*Server, error) {
+	obsShutdown, err := observability.Init(context.Background(), observability.Config{
+		Enabled:      cfg.Observability.Enabled,
+		OTLPEndpoint: cfg.Observability.OTLPEndpoint,
+		ServiceName:  cfg.Observability.ServiceName,
+		Insecure:     cfg.Observability.Insecure,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("observability: %w", err)
+	}
+
 	// 初始化LLM
 	llmClient := llm.NewOpenAI(
 		cfg.LLM.APIKey,
@@ -67,16 +78,50 @@ func NewServer(cfg *config.Config) *Server {
 	}))
 	toolManager.Register(tools.NewFileTool())
 
-	// 初始化记忆管理器
-	memoryManager := memory.NewMemoryManager(cfg.Memory.ShortTermSize, cfg.Memory.LongTermPath)
-
-	// 初始化Agent
-	humanInTheLoop := true // 启用 human-in-the-loop
-	agentInstance := agent.NewAgent(llmClient, toolManager, 5, humanInTheLoop)
-	agentInstance.SetMemoryManager(memoryManager)
-
-	// 设置 LLM 到记忆管理器
+	mrc := memory.RuntimeConfig{
+		ShortTermSize:        cfg.Memory.ShortTermSize,
+		LongTermPath:         cfg.Memory.LongTermPath,
+		CompressMinMessages:  cfg.Memory.CompressMinMessages,
+		CompressTriggerRatio: cfg.Memory.CompressTriggerRatio,
+		LongTermMaxItems:     cfg.Memory.LongTermMaxItems,
+		ContextInjectionK:    cfg.Memory.ContextInjectionK,
+		LongTermMode:         cfg.Memory.LongTermMode,
+		EmbeddingModel:       cfg.Memory.EmbeddingModel,
+	}
+	if cfg.Memory.Redis.Enabled && strings.TrimSpace(cfg.Memory.Redis.Addr) != "" {
+		mrc.RedisAddr = strings.TrimSpace(cfg.Memory.Redis.Addr)
+		mrc.RedisPassword = cfg.Memory.Redis.Password
+		mrc.RedisDB = cfg.Memory.Redis.DB
+		mrc.RedisKeyPrefix = cfg.Memory.Redis.KeyPrefix
+	}
+	memoryManager, err := memory.NewMemoryManagerWithRuntime(mrc)
+	if err != nil {
+		_ = obsShutdown(context.Background())
+		return nil, err
+	}
 	memoryManager.SetLLM(llmClient)
+	memoryManager.SetEmbedder(llmClient)
+
+	specList, defAgentID, err := agents.Load(cfg.Agents.DefinitionsFile)
+	if err != nil {
+		_ = obsShutdown(context.Background())
+		return nil, fmt.Errorf("load agents: %w", err)
+	}
+	agentByID := make(map[string]*agent.Agent)
+	for i := range specList {
+		sp := specList[i]
+		ag, aerr := agent.NewAgent(llmClient, toolManager, sp)
+		if aerr != nil {
+			_ = obsShutdown(context.Background())
+			return nil, fmt.Errorf("init agent %q: %w", sp.ID, aerr)
+		}
+		ag.SetMemoryManager(memoryManager)
+		agentByID[sp.ID] = ag
+	}
+	if _, ok := agentByID[defAgentID]; !ok {
+		_ = obsShutdown(context.Background())
+		return nil, fmt.Errorf("default agent %q missing after load", defAgentID)
+	}
 
 	// 初始化MCP客户端
 	var mcpClient *mcp.MCPClient
@@ -84,45 +129,58 @@ func NewServer(cfg *config.Config) *Server {
 		mcpClient = mcp.NewMCPClient(cfg.MCP.URL)
 	}
 
-	// 初始化认证管理器
-	authManager := auth.NewAuthManager("./auth")
-
 	// 初始化日志记录器
 	logger := logging.NewLogger(logging.INFO, "API")
 
 	return &Server{
-		config:        cfg,
-		llm:           llmClient,
-		toolManager:   toolManager,
-		memoryManager: memoryManager,
-		authManager:   authManager,
-		logger:        logger,
-		agent:         agentInstance,
-		mcpClient:     mcpClient,
-		sessionTokens: make(map[string]string),
+		config:         cfg,
+		llm:            llmClient,
+		toolManager:    toolManager,
+		memoryManager:  memoryManager,
+		logger:         logger,
+		agentByID:      agentByID,
+		defaultAgentID: defAgentID,
+		mcpClient:      mcpClient,
+		obsShutdown:    obsShutdown,
+	}, nil
+}
+
+func (s *Server) pickAgent(agentID string) *agent.Agent {
+	if agentID != "" {
+		if a, ok := s.agentByID[agentID]; ok {
+			return a
+		}
+		s.logger.Warn("unknown agent_id, using default", map[string]interface{}{
+			"agent_id":        agentID,
+			"default_agent_id": s.defaultAgentID,
+		})
 	}
+	return s.agentByID[s.defaultAgentID]
 }
 
 // Start 启动服务器
 func (s *Server) Start() error {
-	// 注册路由
-	http.HandleFunc("/api/auth/register", s.handleRegister)
-	http.HandleFunc("/api/auth/login", s.handleLogin)
-	http.HandleFunc("/api/auth/me", s.handleAuthMe)
-	http.HandleFunc("/api/auth/logout", s.handleLogout)
-	http.HandleFunc("/api/chat", s.handleChat)
-	http.HandleFunc("/api/chat/stream", s.handleChatStream)
-	http.HandleFunc("/api/chat/toolcall", s.handleToolCall)
-	http.HandleFunc("/api/sessions", s.handleSessions)
-	http.HandleFunc("/api/sessions/{id}", s.handleSession)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/agents", s.handleAgents)
+	mux.HandleFunc("/api/chat", s.handleChat)
+	mux.HandleFunc("/api/chat/stream", s.handleChatStream)
+	mux.HandleFunc("/api/chat/toolcall", s.handleToolCall)
+	mux.HandleFunc("/api/sessions", s.handleSessions)
+	mux.HandleFunc("/api/sessions/{id}", s.handleSession)
+	mux.Handle("/", http.FileServer(http.Dir("./frontend")))
 
-	// 提供静态文件
-	http.Handle("/", http.FileServer(http.Dir("./frontend")))
+	svc := s.config.Observability.ServiceName
+	if strings.TrimSpace(svc) == "" {
+		svc = "circle-go"
+	}
+	var handler http.Handler = mux
+	if s.config.Observability.Enabled && strings.TrimSpace(s.config.Observability.OTLPEndpoint) != "" {
+		handler = otelhttp.NewHandler(mux, svc)
+	}
 
-	// 创建服务器
 	s.server = &http.Server{
 		Addr:           fmt.Sprintf("%s:%s", s.config.Server.Host, s.config.Server.Port),
-		Handler:        nil, // 使用默认的ServeMux
+		Handler:        handler,
 		ReadTimeout:    30 * time.Second,
 		WriteTimeout:   60 * time.Second,
 		IdleTimeout:    120 * time.Second,
@@ -141,9 +199,48 @@ func (s *Server) Stop() error {
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return s.server.Shutdown(ctx)
+		if err := s.server.Shutdown(ctx); err != nil {
+			return err
+		}
+	}
+	if s.obsShutdown != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.obsShutdown(ctx)
 	}
 	return nil
+}
+
+// handleAgents GET /api/agents — 列出已加载的智能体（不含完整 system_prompt）
+func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type item struct {
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		ExecutionMode  string `json:"execution_mode"`
+		MaxSteps       int    `json:"max_steps"`
+		HumanInTheLoop bool   `json:"human_in_the_loop"`
+	}
+	var list []item
+	for _, a := range s.agentByID {
+		sp := a.Spec()
+		list = append(list, item{
+			ID:             sp.ID,
+			Name:           sp.DisplayName,
+			ExecutionMode:  string(sp.ExecutionMode),
+			MaxSteps:       sp.MaxSteps,
+			HumanInTheLoop: sp.HumanInTheLoop,
+		})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"default_agent_id": s.defaultAgentID,
+		"agents":           list,
+	})
 }
 
 // handleChat 处理聊天请求
@@ -166,6 +263,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string `json:"session_id"`
 		Message   string `json:"message"`
+		AgentID   string `json:"agent_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -177,10 +275,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ag := s.pickAgent(req.AgentID)
+
 	s.logger.Info("Chat request received", map[string]interface{}{
 		"session_id":     req.SessionID,
 		"message_length": len(req.Message),
 		"client_ip":      r.RemoteAddr,
+		"agent_id":       ag.Spec().ID,
 	})
 
 	// 确保会话存在
@@ -206,7 +307,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 运行Agent
-	response, err := s.agent.Run(r.Context(), req.SessionID, req.Message)
+	response, err := ag.Run(r.Context(), req.SessionID, req.Message)
 	if err != nil {
 		logging.IncrMetric("chat_requests_errors")
 		http.Error(w, fmt.Sprintf("Failed to process message: %v", err), http.StatusInternalServerError)
@@ -305,6 +406,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string `json:"session_id"`
 		Message   string `json:"message"`
+		AgentID   string `json:"agent_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -316,10 +418,13 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ag := s.pickAgent(req.AgentID)
+
 	s.logger.Info("Stream chat request received", map[string]interface{}{
 		"session_id":     req.SessionID,
 		"message_length": len(req.Message),
 		"client_ip":      r.RemoteAddr,
+		"agent_id":       ag.Spec().ID,
 	})
 
 	// 确保会话存在
@@ -350,7 +455,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	// 运行Agent流式
-	finalReply, runErr := s.agent.RunStream(r.Context(), req.SessionID, req.Message, func(chunk string) error {
+	finalReply, runErr := ag.RunStream(r.Context(), req.SessionID, req.Message, func(chunk string) error {
 		writeSSEData(w, chunk)
 		return nil
 	})
@@ -416,135 +521,4 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(session)
-}
-
-// handleRegister 处理用户注册
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 解析请求
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Email    string `json:"email"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// 验证参数
-	if req.Username == "" || req.Password == "" || req.Email == "" {
-		http.Error(w, "Missing required fields", http.StatusBadRequest)
-		return
-	}
-
-	// 注册用户
-	err := s.authManager.Register(req.Username, req.Password, req.Email)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Registration failed: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// 返回成功响应
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"message": "Registration successful",
-	})
-}
-
-// handleLogin 处理用户登录
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 解析请求
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// 验证参数
-	if req.Username == "" || req.Password == "" {
-		http.Error(w, "Missing required fields", http.StatusBadRequest)
-		return
-	}
-
-	// 登录用户
-	token, err := s.authManager.Login(req.Username, req.Password)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Login failed: %v", err), http.StatusUnauthorized)
-		return
-	}
-
-	s.sessionMu.Lock()
-	s.sessionTokens[token] = req.Username
-	s.sessionMu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"token":    token,
-		"username": req.Username,
-		"message":  "Login successful",
-	})
-}
-
-func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	const p = "Bearer "
-	if len(h) > len(p) && strings.EqualFold(h[:len(p)], p) {
-		return strings.TrimSpace(h[len(p):])
-	}
-	return ""
-}
-
-// handleAuthMe GET /api/auth/me — 校验 token，返回当前用户名
-func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	tok := bearerToken(r)
-	if tok == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	s.sessionMu.RLock()
-	u, ok := s.sessionTokens[tok]
-	s.sessionMu.RUnlock()
-	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"username": u})
-}
-
-// handleLogout POST /api/auth/logout — 使 token 失效
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	tok := bearerToken(r)
-	if tok == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	s.sessionMu.Lock()
-	delete(s.sessionTokens, tok)
-	s.sessionMu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
 }

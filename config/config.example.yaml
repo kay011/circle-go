@@ -66,3 +66,9 @@ logging:
 metrics:
   enabled: true
   path: "/metrics"
+
+# Agent 运行时预算配置
+agent_runtime:
+  max_steps: 5
+  max_tool_calls: 20
+  max_duration: 2m

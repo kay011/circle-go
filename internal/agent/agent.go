@@ -3,14 +3,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"circle-go/internal/llm"
 	"circle-go/internal/logging"
 	"circle-go/internal/memory"
 	"circle-go/internal/planner"
+	agentruntime "circle-go/internal/runtime"
 	"circle-go/internal/tools"
 )
 
@@ -222,16 +225,28 @@ type ToolCall struct {
 
 // Agent 智能体（支持任务规划和自我反思）
 type Agent struct {
-	llm             llm.LLM
-	toolManager     *tools.ToolManager
-	memoryManager   *memory.MemoryManager
-	taskPlanner     *planner.Planner
-	reflector       *Reflector
-	maxSteps        int
-	maxToolHistory  int // 最大工具调用历史记录数
-	toolCallHistory []ToolCall
-	humanInTheLoop  bool
-	llmTools        []llm.Tool // 预先转换好的 LLM 工具列表
+	llm                 llm.LLM
+	toolManager         *tools.ToolManager
+	toolGateway         *tools.ToolGateway
+	policyEngine        tools.PolicyEngine
+	memoryManager       *memory.MemoryManager
+	taskPlanner         *planner.Planner
+	reflector           *Reflector
+	maxSteps            int
+	maxToolHistory      int // 最大工具调用历史记录数
+	runtimeMaxToolCalls int
+	runtimeMaxDuration  time.Duration
+	toolCallHistory     []ToolCall
+	humanInTheLoop      bool
+	llmTools            []llm.Tool // 预先转换好的 LLM 工具列表
+	pendingToolCalls    map[string]pendingToolCall
+	pendingMu           sync.Mutex
+	approvalTimeout     time.Duration
+}
+
+type pendingToolCall struct {
+	sessionID string
+	response  chan ToolCallResponse
 }
 
 // NewAgent 创建Agent实例
@@ -242,6 +257,8 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 
 	// 预先转换工具列表为 LLM 工具格式
 	llmTools := prepareLLMTools(toolManager)
+	toolGateway := tools.NewToolGateway(toolManager, 20*time.Second, nil)
+	policyEngine := tools.NewDefaultPolicyEngine(nil)
 
 	// 创建任务规划器
 	taskPlanner := planner.NewPlanner(llm)
@@ -250,15 +267,21 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 	reflector := NewReflector(llm)
 
 	return &Agent{
-		llm:             llm,
-		toolManager:     toolManager,
-		taskPlanner:     taskPlanner,
-		reflector:       reflector,
-		maxSteps:        maxSteps,
-		maxToolHistory:  20, // 最多保留20条工具调用历史
-		toolCallHistory: []ToolCall{},
-		humanInTheLoop:  humanInTheLoop,
-		llmTools:        llmTools,
+		llm:                 llm,
+		toolManager:         toolManager,
+		toolGateway:         toolGateway,
+		policyEngine:        policyEngine,
+		taskPlanner:         taskPlanner,
+		reflector:           reflector,
+		maxSteps:            maxSteps,
+		maxToolHistory:      20,              // 最多保留20条工具调用历史
+		runtimeMaxToolCalls: 20,              // 运行时工具调用预算
+		runtimeMaxDuration:  2 * time.Minute, // 运行时总时长预算
+		toolCallHistory:     []ToolCall{},
+		humanInTheLoop:      humanInTheLoop,
+		llmTools:            llmTools,
+		pendingToolCalls:    make(map[string]pendingToolCall),
+		approvalTimeout:     2 * time.Minute,
 	}
 }
 
@@ -307,6 +330,103 @@ func (a *Agent) SetMemoryManager(memoryManager *memory.MemoryManager) {
 // SetHumanInTheLoop 设置是否启用 human-in-the-loop
 func (a *Agent) SetHumanInTheLoop(humanInTheLoop bool) {
 	a.humanInTheLoop = humanInTheLoop
+}
+
+// SetRuntimeLimits 设置运行时预算（<=0 的值会被忽略）。
+func (a *Agent) SetRuntimeLimits(maxSteps, maxToolCalls int, maxDuration time.Duration) {
+	if maxSteps > 0 {
+		a.maxSteps = maxSteps
+	}
+	if maxToolCalls > 0 {
+		a.runtimeMaxToolCalls = maxToolCalls
+	}
+	if maxDuration > 0 {
+		a.runtimeMaxDuration = maxDuration
+	}
+}
+
+// SetToolGateway 设置自定义工具网关（用于注入审计/策略）。
+func (a *Agent) SetToolGateway(gateway *tools.ToolGateway) {
+	if gateway != nil {
+		a.toolGateway = gateway
+	}
+}
+
+// SetPolicyEngine 设置策略引擎。
+func (a *Agent) SetPolicyEngine(engine tools.PolicyEngine) {
+	if engine != nil {
+		a.policyEngine = engine
+	}
+}
+
+// ResolveToolCallApproval 处理外部的工具审批结果。
+func (a *Agent) ResolveToolCallApproval(sessionID, toolCallID string, approved bool) error {
+	a.pendingMu.Lock()
+	pending, exists := a.pendingToolCalls[toolCallID]
+	if !exists {
+		a.pendingMu.Unlock()
+		return errors.New("tool call not found or already resolved")
+	}
+	if pending.sessionID != sessionID {
+		a.pendingMu.Unlock()
+		return errors.New("session mismatch for tool call")
+	}
+	delete(a.pendingToolCalls, toolCallID)
+	a.pendingMu.Unlock()
+
+	pending.response <- ToolCallResponse{Approved: approved}
+	return nil
+}
+
+func (a *Agent) createToolCallRequest(name string, arguments map[string]interface{}, reasoning string) ToolCallRequest {
+	return ToolCallRequest{
+		ID:        fmt.Sprintf("toolcall_%d", time.Now().UnixNano()),
+		Name:      name,
+		Arguments: arguments,
+		Reasoning: reasoning,
+	}
+}
+
+func (a *Agent) waitForToolApproval(ctx context.Context, sessionID string, req ToolCallRequest) (bool, error) {
+	respCh := make(chan ToolCallResponse, 1)
+
+	a.pendingMu.Lock()
+	a.pendingToolCalls[req.ID] = pendingToolCall{
+		sessionID: sessionID,
+		response:  respCh,
+	}
+	a.pendingMu.Unlock()
+
+	timeout := a.approvalTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case resp := <-respCh:
+		return resp.Approved, nil
+	case <-ctx.Done():
+		a.pendingMu.Lock()
+		delete(a.pendingToolCalls, req.ID)
+		a.pendingMu.Unlock()
+		return false, ctx.Err()
+	case <-timer.C:
+		a.pendingMu.Lock()
+		delete(a.pendingToolCalls, req.ID)
+		a.pendingMu.Unlock()
+		return false, errors.New("tool approval timeout")
+	}
+}
+
+func (a *Agent) newRunContext(sessionID string) *agentruntime.RunContext {
+	return agentruntime.NewRunContext(
+		sessionID,
+		agentruntime.WithMaxSteps(a.maxSteps),
+		agentruntime.WithMaxToolCalls(a.runtimeMaxToolCalls),
+		agentruntime.WithMaxDuration(a.runtimeMaxDuration),
+	)
 }
 
 // isToolCallDuplicate 检查工具调用是否重复
@@ -358,11 +478,15 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 	// 重置工具调用历史
 	a.toolCallHistory = []ToolCall{}
 
+	runCtx := a.newRunContext(sessionID)
+	runCtx.Enter(agentruntime.StateInit)
+
 	// 初始化日志记录器
 	logger := logging.NewLogger(logging.INFO, "Agent")
 	logger.Info("开始处理用户请求", map[string]interface{}{
 		"session_id": sessionID,
 		"user_input": userInput,
+		"trace_id":   runCtx.TraceID,
 	})
 
 	// 增加 Agent 调用计数
@@ -376,6 +500,10 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			Content: SystemPrompt,
 		},
 	}
+
+	runCtx.Enter(agentruntime.StatePlan)
+
+	runCtx.Enter(agentruntime.StatePlan)
 
 	// 添加完整的对话历史（如果有）
 	if a.memoryManager != nil {
@@ -412,11 +540,28 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 	}
 
 	// ReAct循环
-	for step := 0; step < a.maxSteps; step++ {
+	for step := 0; ; step++ {
+		if err := runCtx.ValidateBudget(); err != nil {
+			logging.IncrMetric("agent_calls_errors")
+			runCtx.Enter(agentruntime.StateFailed)
+			logger.Warn("运行时预算超限", map[string]interface{}{
+				"session_id":   sessionID,
+				"trace_id":     runCtx.TraceID,
+				"step":         runCtx.Stats.Steps,
+				"tool_calls":   runCtx.Stats.ToolCalls,
+				"elapsed_ms":   runCtx.Elapsed().Milliseconds(),
+				"budget_cause": err.Error(),
+			})
+			return "处理超时，请尝试简化问题或提供更多信息。", nil
+		}
+
+		runCtx.IncStep()
+		runCtx.Enter(agentruntime.StateExecute)
 		logger.Info("执行ReAct步骤", map[string]interface{}{
 			"step":       step,
 			"max_steps":  a.maxSteps,
 			"session_id": sessionID,
+			"trace_id":   runCtx.TraceID,
 		})
 
 		// 发送请求
@@ -442,8 +587,10 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			logger.Error("LLM调用失败", map[string]interface{}{
 				"error":           err.Error(),
 				"session_id":      sessionID,
+				"trace_id":        runCtx.TraceID,
 				"processing_time": time.Since(startTime).Milliseconds(),
 			})
+			runCtx.Enter(agentruntime.StateFailed)
 			return fmt.Sprintf("抱歉，我无法处理您的请求。错误信息: %v", err), nil
 		}
 
@@ -461,8 +608,10 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 					"tool_name":       functionCall.Name,
 					"arguments":       functionCall.Arguments,
 					"session_id":      sessionID,
+					"trace_id":        runCtx.TraceID,
 					"processing_time": time.Since(startTime).Milliseconds(),
 				})
+				runCtx.Enter(agentruntime.StateFailed)
 				return "检测到工具调用循环，请尝试简化问题或提供更多信息。", nil
 			}
 
@@ -472,16 +621,52 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 				a.toolCallHistory = a.toolCallHistory[len(a.toolCallHistory)-a.maxToolHistory:]
 			}
 
+			// 策略评估：决定 allow / require_approval / deny
+			policyResult := tools.PolicyResult{Decision: tools.PolicyAllow}
+			if a.policyEngine != nil {
+				policyResult = a.policyEngine.Evaluate(ctx, functionCall.Name, functionCall.Arguments)
+			}
+			if policyResult.Decision == tools.PolicyDeny {
+				logging.IncrMetric("tool_calls_denied")
+				logger.Warn("工具调用被策略拒绝", map[string]interface{}{
+					"tool_name": functionCall.Name,
+					"reason":    policyResult.Reason,
+					"trace_id":  runCtx.TraceID,
+				})
+				return fmt.Sprintf("工具调用已被策略拒绝：%s", policyResult.Reason), nil
+			}
+			requireApproval := policyResult.Decision == tools.PolicyRequireApproval
+			if requireApproval {
+				return fmt.Sprintf("工具调用需要人工审批，请使用流式接口继续：%s", functionCall.Name), nil
+			}
+
 			// 执行工具
 			logging.IncrMetric("tool_calls_total")
+			if runCtx.Limits.MaxToolCalls > 0 && runCtx.Stats.ToolCalls >= runCtx.Limits.MaxToolCalls {
+				logging.IncrMetric("agent_calls_errors")
+				runCtx.Enter(agentruntime.StateFailed)
+				logger.Warn("工具执行前预算超限", map[string]interface{}{
+					"session_id":   sessionID,
+					"trace_id":     runCtx.TraceID,
+					"tool_name":    functionCall.Name,
+					"step":         runCtx.Stats.Steps,
+					"tool_calls":   runCtx.Stats.ToolCalls,
+					"elapsed_ms":   runCtx.Elapsed().Milliseconds(),
+					"budget_cause": agentruntime.ErrToolBudgetExceeded.Error(),
+				})
+				return "处理超时，请尝试简化问题或提供更多信息。", nil
+			}
+			runCtx.IncToolCall()
+
 			toolStartTime := time.Now()
 			logger.Info("执行工具", map[string]interface{}{
 				"tool_name":  functionCall.Name,
 				"arguments":  functionCall.Arguments,
 				"session_id": sessionID,
+				"trace_id":   runCtx.TraceID,
 			})
 
-			toolResult, err := a.toolManager.Run(ctx, functionCall.Name, functionCall.Arguments)
+			toolResult, err := a.toolGateway.Execute(ctx, functionCall.Name, functionCall.Arguments)
 			toolProcessingTime := time.Since(toolStartTime).Milliseconds()
 			if err != nil {
 				logging.IncrMetric("tool_calls_errors")
@@ -489,6 +674,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 					"tool_name":       functionCall.Name,
 					"error":           err.Error(),
 					"session_id":      sessionID,
+					"trace_id":        runCtx.TraceID,
 					"processing_time": toolProcessingTime,
 				})
 				toolResult = fmt.Sprintf("Error: %v", err)
@@ -497,6 +683,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 					"tool_name":       functionCall.Name,
 					"result_length":   len(toolResult),
 					"session_id":      sessionID,
+					"trace_id":        runCtx.TraceID,
 					"processing_time": toolProcessingTime,
 				})
 			}
@@ -532,9 +719,12 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 
 			// 直接返回答案
 			processingTime := time.Since(startTime).Milliseconds()
+			runCtx.Enter(agentruntime.StateVerify)
+			runCtx.Enter(agentruntime.StateFinalize)
 			logger.Info("返回LLM响应", map[string]interface{}{
 				"response_length": len(response),
 				"session_id":      sessionID,
+				"trace_id":        runCtx.TraceID,
 				"processing_time": processingTime,
 			})
 			// 打印完整响应(调试用)
@@ -548,8 +738,10 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 	processingTime := time.Since(startTime).Milliseconds()
 	logger.Info("处理超时", map[string]interface{}{
 		"session_id":      sessionID,
+		"trace_id":        runCtx.TraceID,
 		"processing_time": processingTime,
 	})
+	runCtx.Enter(agentruntime.StateFailed)
 	return "处理超时，请尝试简化问题或提供更多信息。", nil
 }
 
@@ -560,6 +752,9 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 
 	// 重置工具调用历史
 	a.toolCallHistory = []ToolCall{}
+
+	runCtx := a.newRunContext(sessionID)
+	runCtx.Enter(agentruntime.StateInit)
 
 	// 初始化对话历史
 	messages := []llm.Message{
@@ -606,6 +801,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 	logger.Info("开始处理用户请求", map[string]interface{}{
 		"session_id":  sessionID,
 		"user_input":  userInput,
+		"trace_id":    runCtx.TraceID,
 		"init_time":   time.Since(startTime).Milliseconds(),
 		"memory_time": memoryDuration.Milliseconds(),
 	})
@@ -622,11 +818,31 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 	}
 
 	// ReAct循环
-	for step := 0; step < a.maxSteps; step++ {
+	for step := 0; ; step++ {
+		if err := runCtx.ValidateBudget(); err != nil {
+			runCtx.Enter(agentruntime.StateFailed)
+			logger.Warn("运行时预算超限", map[string]interface{}{
+				"trace_id":     runCtx.TraceID,
+				"session_id":   sessionID,
+				"step":         runCtx.Stats.Steps,
+				"tool_calls":   runCtx.Stats.ToolCalls,
+				"elapsed_ms":   runCtx.Elapsed().Milliseconds(),
+				"budget_cause": err.Error(),
+			})
+			msg := "处理超时，请尝试简化问题或提供更多信息。"
+			if cerr := callback(msg); cerr != nil {
+				return "", cerr
+			}
+			return msg, nil
+		}
+
+		runCtx.IncStep()
+		runCtx.Enter(agentruntime.StateExecute)
 		stepStartTime := time.Now()
 		logger.Info("执行ReAct步骤", map[string]interface{}{
 			"step":      step,
 			"max_steps": a.maxSteps,
+			"trace_id":  runCtx.TraceID,
 		})
 
 		// 发送请求
@@ -651,7 +867,9 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			logger.Error("LLM调用失败", map[string]interface{}{
 				"error":    err.Error(),
 				"duration": llmDuration.Milliseconds(),
+				"trace_id": runCtx.TraceID,
 			})
+			runCtx.Enter(agentruntime.StateFailed)
 			msg := fmt.Sprintf("抱歉，我无法处理您的请求。错误信息: %v", err)
 			if cerr := callback(msg); cerr != nil {
 				return "", cerr
@@ -687,7 +905,9 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				logger.Error("检测到工具调用循环", map[string]interface{}{
 					"tool_name": functionCall.Name,
 					"arguments": functionCall.Arguments,
+					"trace_id":  runCtx.TraceID,
 				})
+				runCtx.Enter(agentruntime.StateFailed)
 				msg := "检测到工具调用循环，请尝试简化问题或提供更多信息。"
 				if cerr := callback(msg); cerr != nil {
 					return "", cerr
@@ -701,18 +921,39 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				a.toolCallHistory = a.toolCallHistory[len(a.toolCallHistory)-a.maxToolHistory:]
 			}
 
+			// 策略评估：决定 allow / require_approval / deny
+			policyResult := tools.PolicyResult{Decision: tools.PolicyAllow}
+			if a.policyEngine != nil {
+				policyResult = a.policyEngine.Evaluate(ctx, functionCall.Name, functionCall.Arguments)
+			}
+			if policyResult.Decision == tools.PolicyDeny {
+				logger.Warn("工具调用被策略拒绝", map[string]interface{}{
+					"tool_name": functionCall.Name,
+					"reason":    policyResult.Reason,
+					"trace_id":  runCtx.TraceID,
+				})
+				msg := fmt.Sprintf("工具调用已被策略拒绝：%s", policyResult.Reason)
+				if cerr := callback(msg); cerr != nil {
+					return "", cerr
+				}
+				return msg, nil
+			}
+			requireApproval := policyResult.Decision == tools.PolicyRequireApproval
+
 			// 检查是否启用了 human-in-the-loop
 			logger.Info("检查 human-in-the-loop 设置", map[string]interface{}{
 				"human_in_the_loop": a.humanInTheLoop,
+				"require_approval":  requireApproval,
 			})
-			if a.humanInTheLoop {
-				// 生成工具调用请求
-				toolCallRequest := ToolCallRequest{
-					ID:        fmt.Sprintf("toolcall_%d", time.Now().UnixNano()),
-					Name:      functionCall.Name,
-					Arguments: functionCall.Arguments,
-					Reasoning: response, // 使用 LLM 的响应作为调用原因
+			if requireApproval {
+				if !a.humanInTheLoop {
+					msg := fmt.Sprintf("工具调用需要人工审批但当前未启用审批：%s", functionCall.Name)
+					if cerr := callback(msg); cerr != nil {
+						return "", cerr
+					}
+					return msg, nil
 				}
+				toolCallRequest := a.createToolCallRequest(functionCall.Name, functionCall.Arguments, response)
 
 				// 发送工具调用请求给前端
 				toolCallJSON, err := json.Marshal(map[string]interface{}{
@@ -738,8 +979,32 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 					return "", cerr
 				}
 
-				// 这里应该等待用户确认，实际实现需要更复杂的逻辑
-				// 目前我们假设用户总是批准工具调用
+				approved, waitErr := a.waitForToolApproval(ctx, sessionID, toolCallRequest)
+				if waitErr != nil {
+					logger.Warn("等待工具审批失败", map[string]interface{}{
+						"tool_name":    functionCall.Name,
+						"tool_call_id": toolCallRequest.ID,
+						"error":        waitErr.Error(),
+						"trace_id":     runCtx.TraceID,
+					})
+					msg := "工具调用审批超时或会话已取消，请重试。"
+					if cerr := callback(msg); cerr != nil {
+						return "", cerr
+					}
+					return msg, nil
+				}
+				if !approved {
+					logger.Info("工具调用被拒绝", map[string]interface{}{
+						"tool_name":    functionCall.Name,
+						"tool_call_id": toolCallRequest.ID,
+						"trace_id":     runCtx.TraceID,
+					})
+					msg := fmt.Sprintf("工具调用已取消：%s", functionCall.Name)
+					if cerr := callback(msg); cerr != nil {
+						return "", cerr
+					}
+					return msg, nil
+				}
 			}
 
 			// 通知用户正在使用工具
@@ -749,19 +1014,40 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			}
 
 			// 执行工具
+			if runCtx.Limits.MaxToolCalls > 0 && runCtx.Stats.ToolCalls >= runCtx.Limits.MaxToolCalls {
+				runCtx.Enter(agentruntime.StateFailed)
+				logger.Warn("工具执行前预算超限", map[string]interface{}{
+					"trace_id":     runCtx.TraceID,
+					"session_id":   sessionID,
+					"tool_name":    functionCall.Name,
+					"step":         runCtx.Stats.Steps,
+					"tool_calls":   runCtx.Stats.ToolCalls,
+					"elapsed_ms":   runCtx.Elapsed().Milliseconds(),
+					"budget_cause": agentruntime.ErrToolBudgetExceeded.Error(),
+				})
+				msg := "处理超时，请尝试简化问题或提供更多信息。"
+				if cerr := callback(msg); cerr != nil {
+					return "", cerr
+				}
+				return msg, nil
+			}
+			runCtx.IncToolCall()
+
 			toolStartTime := time.Now()
 			logger.Info("执行工具", map[string]interface{}{
 				"tool_name": functionCall.Name,
 				"arguments": functionCall.Arguments,
+				"trace_id":  runCtx.TraceID,
 			})
 
-			toolResult, err := a.toolManager.Run(ctx, functionCall.Name, functionCall.Arguments)
+			toolResult, err := a.toolGateway.Execute(ctx, functionCall.Name, functionCall.Arguments)
 			toolDuration := time.Since(toolStartTime)
 			if err != nil {
 				logger.Error("工具执行失败", map[string]interface{}{
 					"tool_name": functionCall.Name,
 					"error":     err.Error(),
 					"duration":  toolDuration.Milliseconds(),
+					"trace_id":  runCtx.TraceID,
 				})
 				toolResult = fmt.Sprintf("Error: %v", err)
 			} else {
@@ -769,6 +1055,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 					"tool_name":     functionCall.Name,
 					"result_length": len(toolResult),
 					"duration":      toolDuration.Milliseconds(),
+					"trace_id":      runCtx.TraceID,
 				})
 			}
 
@@ -802,6 +1089,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			logger.Info("ReAct步骤完成", map[string]interface{}{
 				"step":     step,
 				"duration": stepDuration.Milliseconds(),
+				"trace_id": runCtx.TraceID,
 			})
 		} else {
 			// 将重要信息添加到长期记忆
@@ -819,9 +1107,13 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			logger.Info("ReAct步骤完成", map[string]interface{}{
 				"step":     step,
 				"duration": stepDuration.Milliseconds(),
+				"trace_id": runCtx.TraceID,
 			})
+			runCtx.Enter(agentruntime.StateVerify)
+			runCtx.Enter(agentruntime.StateFinalize)
 			logger.Info("返回LLM响应", map[string]interface{}{
 				"response_length": len(response),
+				"trace_id":        runCtx.TraceID,
 			})
 			if err := streamResponse(response, callback); err != nil {
 				return "", err
@@ -835,9 +1127,11 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 	logger.Info("处理完成", map[string]interface{}{
 		"session_id":     sessionID,
 		"total_duration": totalDuration.Milliseconds(),
+		"trace_id":       runCtx.TraceID,
 	})
 
 	msg := "处理超时，请尝试简化问题或提供更多信息。"
+	runCtx.Enter(agentruntime.StateFailed)
 	if cerr := callback(msg); cerr != nil {
 		return "", cerr
 	}

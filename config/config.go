@@ -10,15 +10,16 @@ import (
 
 // Config 应用配置结构
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	LLM       LLMConfig       `yaml:"llm"`
-	Memory    MemoryConfig    `yaml:"memory"`
-	RateLimit RateLimitConfig `yaml:"rate_limit"`
-	FileTool  FileToolConfig  `yaml:"file_tool"`
-	Search    SearchConfig    `yaml:"search"`
-	MCP       MCPConfig       `yaml:"mcp"`
-	Logging   LoggingConfig   `yaml:"logging"`
-	Metrics   MetricsConfig   `yaml:"metrics"`
+	Server       ServerConfig       `yaml:"server"`
+	LLM          LLMConfig          `yaml:"llm"`
+	Memory       MemoryConfig       `yaml:"memory"`
+	RateLimit    RateLimitConfig    `yaml:"rate_limit"`
+	FileTool     FileToolConfig     `yaml:"file_tool"`
+	Search       SearchConfig       `yaml:"search"`
+	MCP          MCPConfig          `yaml:"mcp"`
+	Logging      LoggingConfig      `yaml:"logging"`
+	Metrics      MetricsConfig      `yaml:"metrics"`
+	AgentRuntime AgentRuntimeConfig `yaml:"agent_runtime"`
 }
 
 // ServerConfig 服务器配置
@@ -98,6 +99,13 @@ type LoggingConfig struct {
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+}
+
+// AgentRuntimeConfig Agent 运行时预算配置
+type AgentRuntimeConfig struct {
+	MaxSteps     int           `yaml:"max_steps"`
+	MaxToolCalls int           `yaml:"max_tool_calls"`
+	MaxDuration  time.Duration `yaml:"max_duration"`
 }
 
 // Load 加载配置文件
@@ -246,6 +254,17 @@ func setDefaults(cfg *Config) {
 	if cfg.Metrics.Path == "" {
 		cfg.Metrics.Path = "/metrics"
 	}
+
+	// Agent runtime defaults
+	if cfg.AgentRuntime.MaxSteps == 0 {
+		cfg.AgentRuntime.MaxSteps = 5
+	}
+	if cfg.AgentRuntime.MaxToolCalls == 0 {
+		cfg.AgentRuntime.MaxToolCalls = 20
+	}
+	if cfg.AgentRuntime.MaxDuration == 0 {
+		cfg.AgentRuntime.MaxDuration = 2 * time.Minute
+	}
 }
 
 // validate 验证配置
@@ -299,6 +318,17 @@ func validate(cfg *Config) error {
 	}
 	if !validLevels[cfg.Logging.Level] {
 		return fmt.Errorf("invalid logging level: %s (must be debug, info, warn, or error)", cfg.Logging.Level)
+	}
+
+	// 验证 Agent 运行时预算
+	if cfg.AgentRuntime.MaxSteps <= 0 {
+		return fmt.Errorf("agent_runtime max_steps must be positive")
+	}
+	if cfg.AgentRuntime.MaxToolCalls <= 0 {
+		return fmt.Errorf("agent_runtime max_tool_calls must be positive")
+	}
+	if cfg.AgentRuntime.MaxDuration <= 0 {
+		return fmt.Errorf("agent_runtime max_duration must be positive")
 	}
 
 	return nil

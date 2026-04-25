@@ -69,7 +69,12 @@ func NewServer(cfg *config.Config) *Server {
 
 	// 初始化Agent
 	humanInTheLoop := true // 启用 human-in-the-loop
-	agentInstance := agent.NewAgent(llmClient, toolManager, 5, humanInTheLoop)
+	agentInstance := agent.NewAgent(llmClient, toolManager, cfg.AgentRuntime.MaxSteps, humanInTheLoop)
+	agentInstance.SetRuntimeLimits(
+		cfg.AgentRuntime.MaxSteps,
+		cfg.AgentRuntime.MaxToolCalls,
+		cfg.AgentRuntime.MaxDuration,
+	)
 	agentInstance.SetMemoryManager(memoryManager)
 
 	// 设置 LLM 到记忆管理器
@@ -89,6 +94,23 @@ func NewServer(cfg *config.Config) *Server {
 
 	// 初始化日志记录器
 	logger := logging.NewLogger(logging.INFO, "API")
+
+	// 初始化工具网关（M2：统一工具治理入口）
+	toolGateway := tools.NewToolGateway(toolManager, 20*time.Second, func(event tools.AuditEvent) {
+		fields := map[string]interface{}{
+			"tool_name":   event.ToolName,
+			"status":      string(event.Status),
+			"duration_ms": event.Duration.Milliseconds(),
+		}
+		if event.Error != "" {
+			fields["error"] = event.Error
+		}
+		if len(event.Arguments) > 0 {
+			fields["arguments"] = event.Arguments
+		}
+		logger.Info("Tool gateway audit", fields)
+	})
+	agentInstance.SetToolGateway(toolGateway)
 
 	return &Server{
 		config:        cfg,
@@ -340,12 +362,22 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		"approved":     req.Approved,
 	})
 
-	// 这里需要处理工具调用确认，实际实现需要根据 Agent 的设计来完成
-	// 目前返回成功响应
+	if err := s.agent.ResolveToolCallApproval(req.SessionID, req.ToolCallID, req.Approved); err != nil {
+		s.logger.Warn("Tool call confirmation rejected", map[string]interface{}{
+			"session_id":   req.SessionID,
+			"tool_call_id": req.ToolCallID,
+			"error":        err.Error(),
+		})
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "success",
-		"message": "Tool call processed",
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":       "success",
+		"tool_call_id": req.ToolCallID,
+		"approved":     req.Approved,
+		"message":      "Tool call processed",
 	})
 }
 

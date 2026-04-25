@@ -8,6 +8,9 @@
 - **长短期记忆**：支持短期记忆（对话历史）和长期记忆（重要信息）
 - **ReAct 模式**：采用思考-行动-观察的模式，提高任务完成能力
 - **函数调用**：支持调用内置工具和自定义工具
+- **工具网关治理**：统一参数校验、超时控制、审计日志
+- **策略引擎**：支持 allow / require_approval / deny 三态决策
+- **阻塞式人工审批**：高风险工具调用可挂起等待用户确认
 - **MCP 协议**：支持 Model Context Protocol，与其他系统集成
 - **用户认证**：支持用户注册和登录
 - **流式响应**：支持实时流式聊天体验
@@ -158,6 +161,12 @@ memory:
 mcp:
   enabled: false
   url: "http://localhost:8000"
+
+# Agent runtime configuration
+agent_runtime:
+  max_steps: 5
+  max_tool_calls: 20
+  max_duration: 2m
 ```
 
 **注意**：请确保不要将包含实际API密钥的config.yaml文件提交到版本控制系统，该文件已在.gitignore中被忽略。
@@ -213,6 +222,29 @@ go run cmd/api/main.go
 ```json
 {
   "sessions": ["session123", "session456"]
+}
+```
+
+### 7. 工具审批接口（Human-in-the-loop）
+
+**POST /api/chat/toolcall**
+
+请求体：
+```json
+{
+  "session_id": "session123",
+  "tool_call_id": "toolcall_1710000000000",
+  "approved": true
+}
+```
+
+响应：
+```json
+{
+  "status": "success",
+  "tool_call_id": "toolcall_1710000000000",
+  "approved": true,
+  "message": "Tool call processed"
 }
 ```
 
@@ -323,6 +355,34 @@ go run cmd/api/main.go
   }
 }
 ```
+
+### 4. HTTP 客户端工具 (`http_client`)
+
+**参数**：
+- `method`: HTTP 方法（默认 `GET`）
+- `url`: 目标 URL（必须是 `http://` 或 `https://`）
+- `headers`: 可选，请求头（字符串）
+- `body`: 可选，请求体（字符串）
+
+## 工具治理与审批
+
+系统在工具执行前会经过三层治理：
+
+1. **策略引擎决策**：`allow` / `require_approval` / `deny`
+2. **工具网关执行**：参数校验、超时控制、审计事件
+3. **人工审批闭环**（仅 `require_approval`）：流式接口挂起等待 `/api/chat/toolcall` 决策
+
+默认策略示例：
+
+- `file_operation`：
+  - `file_path` 含 `..` -> `deny`
+  - `operation=write` -> `require_approval`
+- `http_client`：
+  - 访问本地/内网地址 -> `deny`
+  - 非 `GET` 请求 -> `require_approval`
+  - `GET` 非可信域名（配置了可信域名时）-> `require_approval`
+
+> 说明：阻塞审批链路基于流式接口设计，建议使用 `/api/chat/stream` 体验完整审批流程。
 
 ## 项目结构
 

@@ -83,34 +83,32 @@ flowchart TD
     style Q fill:#fbf,stroke:#333,stroke-width:2px
 ```
 
+
+
 ### 架构说明
 
 1. **前端层**：
-   - 用户浏览器：用户与系统交互的界面
-   - 前端静态文件：提供 HTML、CSS 和 JavaScript 文件
-   - API 服务器：处理 HTTP 请求和响应
-
+  - 用户浏览器：用户与系统交互的界面
+  - 前端静态文件：提供 HTML、CSS 和 JavaScript 文件
+  - API 服务器：处理 HTTP 请求和响应
 2. **后端核心层**：
-   - 会话管理：管理用户会话和对话历史
-   - AI Agent：核心智能模块，实现 ReAct 模式
-   - ReAct 循环：思考-行动-观察的循环过程
-   - 工具管理：管理和调用各种工具
-   - 记忆管理：管理短期和长期记忆
-   - LLM 客户端：与 OpenAI API 交互
-
+  - 会话管理：管理用户会话和对话历史
+  - AI Agent：核心智能模块，实现 ReAct 模式
+  - ReAct 循环：思考-行动-观察的循环过程
+  - 工具管理：管理和调用各种工具
+  - 记忆管理：管理短期和长期记忆
+  - LLM 客户端：与 OpenAI API 交互
 3. **存储层**：
-   - 内存存储：存储短期记忆（对话历史）
-   - 文件存储：存储长期记忆（重要信息）
-   - 用户画像存储：存储用户信息和偏好
-
+  - 内存存储：存储短期记忆（对话历史）
+  - 文件存储：存储长期记忆（重要信息）
+  - 用户画像存储：存储用户信息和偏好
 4. **工具层**：
-   - 计算器工具：执行数学计算
-   - 网络搜索工具：搜索网络信息
-   - 文件操作工具：读写文件操作
-
+  - 计算器工具：执行数学计算
+  - 网络搜索工具：搜索网络信息
+  - 文件操作工具：读写文件操作
 5. **监控层**：
-   - 日志系统：记录系统运行状态和错误信息
-   - 监控指标：收集系统性能和使用情况指标
+  - 日志系统：记录系统运行状态和错误信息
+  - 监控指标：收集系统性能和使用情况指标
 
 ### 数据流向
 
@@ -176,7 +174,10 @@ flowchart TD
     class OBS,LOGS,METRICS,TRACES obs;
 ```
 
+
+
 **v2 设计要点**：
+
 - Agent 运行与工具执行解耦，支持异步任务和重试恢复。
 - 会话、审批、任务状态外置到 Redis/PostgreSQL，支持多副本部署。
 - 记忆分层：短期缓存（Redis）+ 长期事实（PostgreSQL）+ 语义检索（Vector DB）。
@@ -245,6 +246,7 @@ go run cmd/api/main.go
 **POST /api/chat**
 
 请求体：
+
 ```json
 {
   "session_id": "session123",
@@ -253,6 +255,7 @@ go run cmd/api/main.go
 ```
 
 响应：
+
 ```json
 {
   "response": "计算结果: 14"
@@ -264,6 +267,7 @@ go run cmd/api/main.go
 **POST /api/chat/stream**
 
 请求体：
+
 ```json
 {
   "session_id": "session123",
@@ -278,6 +282,7 @@ go run cmd/api/main.go
 **GET /api/sessions**
 
 响应：
+
 ```json
 {
   "sessions": ["session123", "session456"]
@@ -289,15 +294,41 @@ go run cmd/api/main.go
 **POST /api/chat/toolcall**
 
 请求体：
+
 ```json
 {
   "session_id": "session123",
   "tool_call_id": "toolcall_1710000000000",
+  "approval_token": "b27f9f7c7ce2468ea6f7c8608f1f2274",
   "approved": true
 }
 ```
 
+### 8. 监控指标接口
+
+**GET /metrics**
+
+返回 Prometheus 文本格式指标，可直接被 Prometheus 抓取。
+
+示例（节选）：
+```text
+# TYPE chat_requests_total counter
+chat_requests_total{endpoint="/api/chat"} 12
+# TYPE tool_policy_decision_total counter
+tool_policy_decision_total{decision="deny",tool_name="http_client"} 3
+# TYPE chat_request_duration_seconds histogram
+chat_request_duration_seconds_bucket{endpoint="/api/chat",le="0.1"} 8
+chat_request_duration_seconds_bucket{endpoint="/api/chat",le="+Inf"} 12
+chat_request_duration_seconds_sum{endpoint="/api/chat"} 2.31
+chat_request_duration_seconds_count{endpoint="/api/chat"} 12
+# TYPE process_uptime_seconds gauge
+process_uptime_seconds 123.456
+# TYPE circle_go_build_info gauge
+circle_go_build_info{version="1.0.0"} 1
+```
+
 响应：
+
 ```json
 {
   "status": "success",
@@ -307,11 +338,28 @@ go run cmd/api/main.go
 }
 ```
 
+### 9. 统一错误响应
+
+非流式接口统一返回：
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "Invalid request body",
+    "retryable": false
+  }
+}
+```
+
+流式接口（`/api/chat/stream`）在 SSE `data:` 中返回同结构错误 payload，前端会展示错误码并提示是否可重试。
+
 ### 4. 会话详情接口
 
 **GET /api/sessions/{id}**
 
 响应：
+
 ```json
 {
   "id": "session123",
@@ -327,6 +375,7 @@ go run cmd/api/main.go
 **POST /api/auth/register**
 
 请求体：
+
 ```json
 {
   "username": "user1",
@@ -336,6 +385,7 @@ go run cmd/api/main.go
 ```
 
 响应：
+
 ```json
 {
   "message": "Registration successful"
@@ -347,6 +397,7 @@ go run cmd/api/main.go
 **POST /api/auth/login**
 
 请求体：
+
 ```json
 {
   "username": "user1",
@@ -355,6 +406,7 @@ go run cmd/api/main.go
 ```
 
 响应：
+
 ```json
 {
   "token": "jwt_token_here",
@@ -367,9 +419,11 @@ go run cmd/api/main.go
 ### 1. 计算器工具 (`calculator`)
 
 **参数**：
+
 - `expression`: 数学表达式，例如：`2 + 3 * 4`
 
 **示例**：
+
 ```json
 {
   "name": "calculator",
@@ -382,10 +436,12 @@ go run cmd/api/main.go
 ### 2. 网络搜索工具 (`web_search`)
 
 **参数**：
+
 - `query`: 搜索查询词
 - `num_results`: 返回结果数量，默认为 3
 
 **示例**：
+
 ```json
 {
   "name": "web_search",
@@ -399,11 +455,13 @@ go run cmd/api/main.go
 ### 3. 文件操作工具 (`file_operation`)
 
 **参数**：
+
 - `operation`: 操作类型：`read` 或 `write`
 - `file_path`: 文件路径
 - `content`: 写入文件的内容（仅在 operation 为 write 时需要）
 
 **示例**：
+
 ```json
 {
   "name": "file_operation",
@@ -418,6 +476,7 @@ go run cmd/api/main.go
 ### 4. HTTP 客户端工具 (`http_client`)
 
 **参数**：
+
 - `method`: HTTP 方法（默认 `GET`）
 - `url`: 目标 URL（必须是 `http://` 或 `https://`）
 - `headers`: 可选，请求头（字符串）
@@ -430,6 +489,7 @@ go run cmd/api/main.go
 1. **策略引擎决策**：`allow` / `require_approval` / `deny`
 2. **工具网关执行**：参数校验、超时控制、审计事件
 3. **人工审批闭环**（仅 `require_approval`）：流式接口挂起等待 `/api/chat/toolcall` 决策
+4. **防重放令牌**：每次工具审批都带一次性 `approval_token`，服务端校验通过后即消费失效
 
 默认策略示例：
 
@@ -448,7 +508,30 @@ go run cmd/api/main.go
 - `agent_runtime.trusted_http_domains`：HTTP 工具可信域名白名单（留空表示不启用域名白名单）
 
 > 说明：阻塞审批链路基于流式接口设计，建议使用 `/api/chat/stream` 体验完整审批流程。
-> 前端已内置审批交互卡片：收到工具调用后可直接在聊天窗口点击「批准执行 / 拒绝」。
+> 前端已内置审批交互卡片：收到工具调用后可直接在聊天窗口点击「批准执行 / 拒绝」，并自动携带一次性 token。
+
+### 分布式审批状态（Redis）
+
+若你以多副本部署 API 服务，建议开启 Redis 共享审批状态，避免审批请求落到不同实例时状态丢失。
+
+```yaml
+redis:
+  enabled: true
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  prefix: "circle_go"
+```
+
+开启后，工具审批状态会写入 Redis（带 TTL），Agent 在等待审批时会同时监听本地通道和 Redis 状态。
+
+### 指标标签维度
+
+关键指标已支持标签维度，便于按路由/工具/策略决策聚合：
+
+- `endpoint`：如 `/api/chat`、`/api/chat/stream`、`/api/chat/plan`
+- `tool_name`：如 `http_client`、`file_operation`
+- `decision`：`allow` / `require_approval` / `deny`
 
 ## 项目结构
 

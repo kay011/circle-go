@@ -122,7 +122,7 @@ func TestRunStream_HumanApprovalApproved(t *testing.T) {
 			req := payload["tool_call"]
 			go func() {
 				time.Sleep(20 * time.Millisecond)
-				_ = a.ResolveToolCallApproval("s1", req.ID, true)
+				_ = a.ResolveToolCallApproval("s1", req.ID, req.ApprovalToken, true)
 			}()
 		}
 		return nil
@@ -158,7 +158,7 @@ func TestRunStream_HumanApprovalRejected(t *testing.T) {
 			req := payload["tool_call"]
 			go func() {
 				time.Sleep(20 * time.Millisecond)
-				_ = a.ResolveToolCallApproval("s1", req.ID, false)
+				_ = a.ResolveToolCallApproval("s1", req.ID, req.ApprovalToken, false)
 			}()
 		}
 		return nil

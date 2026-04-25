@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -206,10 +208,11 @@ const SystemPrompt = `# 角色定位
 
 // ToolCallRequest 工具调用请求
 type ToolCallRequest struct {
-	ID        string                 `json:"id"`
-	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments"`
-	Reasoning string                 `json:"reasoning"`
+	ID            string                 `json:"id"`
+	Name          string                 `json:"name"`
+	Arguments     map[string]interface{} `json:"arguments"`
+	Reasoning     string                 `json:"reasoning"`
+	ApprovalToken string                 `json:"approval_token"`
 }
 
 // ToolCallResponse 工具调用响应
@@ -242,10 +245,12 @@ type Agent struct {
 	pendingToolCalls    map[string]pendingToolCall
 	pendingMu           sync.Mutex
 	approvalTimeout     time.Duration
+	approvalStore       ApprovalStore
 }
 
 type pendingToolCall struct {
 	sessionID string
+	token     string
 	response  chan ToolCallResponse
 }
 
@@ -282,6 +287,7 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 		llmTools:            llmTools,
 		pendingToolCalls:    make(map[string]pendingToolCall),
 		approvalTimeout:     2 * time.Minute,
+		approvalStore:       &noopApprovalStore{},
 	}
 }
 
@@ -366,22 +372,37 @@ func (a *Agent) SetApprovalTimeout(timeout time.Duration) {
 	}
 }
 
+// SetApprovalStore 设置审批状态存储（Redis 等）。
+func (a *Agent) SetApprovalStore(store ApprovalStore) {
+	if store != nil {
+		a.approvalStore = store
+	}
+}
+
 // ResolveToolCallApproval 处理外部的工具审批结果。
-func (a *Agent) ResolveToolCallApproval(sessionID, toolCallID string, approved bool) error {
+func (a *Agent) ResolveToolCallApproval(sessionID, toolCallID, approvalToken string, approved bool) error {
 	a.pendingMu.Lock()
 	pending, exists := a.pendingToolCalls[toolCallID]
-	if !exists {
-		a.pendingMu.Unlock()
-		return errors.New("tool call not found or already resolved")
+	if exists {
+		if pending.sessionID != sessionID {
+			a.pendingMu.Unlock()
+			return errors.New("session mismatch for tool call")
+		}
+		if pending.token != "" && pending.token != approvalToken {
+			a.pendingMu.Unlock()
+			return errors.New("invalid approval token")
+		}
+		delete(a.pendingToolCalls, toolCallID)
 	}
-	if pending.sessionID != sessionID {
-		a.pendingMu.Unlock()
-		return errors.New("session mismatch for tool call")
-	}
-	delete(a.pendingToolCalls, toolCallID)
 	a.pendingMu.Unlock()
 
-	pending.response <- ToolCallResponse{Approved: approved}
+	if err := a.approvalStore.SetDecision(context.Background(), sessionID, toolCallID, approvalToken, approved); err != nil {
+		return err
+	}
+
+	if exists {
+		pending.response <- ToolCallResponse{Approved: approved}
+	}
 	if approved {
 		logging.IncrMetric("tool_approvals_approved_total")
 	} else {
@@ -391,12 +412,22 @@ func (a *Agent) ResolveToolCallApproval(sessionID, toolCallID string, approved b
 }
 
 func (a *Agent) createToolCallRequest(name string, arguments map[string]interface{}, reasoning string) ToolCallRequest {
+	token := randomToken()
 	return ToolCallRequest{
-		ID:        fmt.Sprintf("toolcall_%d", time.Now().UnixNano()),
-		Name:      name,
-		Arguments: arguments,
-		Reasoning: reasoning,
+		ID:            fmt.Sprintf("toolcall_%d", time.Now().UnixNano()),
+		Name:          name,
+		Arguments:     arguments,
+		Reasoning:     reasoning,
+		ApprovalToken: token,
 	}
+}
+
+func randomToken() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("fallback_%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
 }
 
 func (a *Agent) waitForToolApproval(ctx context.Context, sessionID string, req ToolCallRequest) (bool, error) {
@@ -405,6 +436,7 @@ func (a *Agent) waitForToolApproval(ctx context.Context, sessionID string, req T
 	a.pendingMu.Lock()
 	a.pendingToolCalls[req.ID] = pendingToolCall{
 		sessionID: sessionID,
+		token:     req.ApprovalToken,
 		response:  respCh,
 	}
 	a.pendingMu.Unlock()
@@ -413,24 +445,48 @@ func (a *Agent) waitForToolApproval(ctx context.Context, sessionID string, req T
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
+	if err := a.approvalStore.CreatePending(ctx, sessionID, req.ID, req.ApprovalToken, timeout); err != nil {
+		return false, err
+	}
+
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
 
-	select {
-	case resp := <-respCh:
-		return resp.Approved, nil
-	case <-ctx.Done():
-		a.pendingMu.Lock()
-		delete(a.pendingToolCalls, req.ID)
-		a.pendingMu.Unlock()
-		logging.IncrMetric("tool_approvals_cancelled_total")
-		return false, ctx.Err()
-	case <-timer.C:
-		a.pendingMu.Lock()
-		delete(a.pendingToolCalls, req.ID)
-		a.pendingMu.Unlock()
-		logging.IncrMetric("tool_approvals_timeout_total")
-		return false, errors.New("tool approval timeout")
+	for {
+		select {
+		case resp := <-respCh:
+			_ = a.approvalStore.Delete(context.Background(), req.ID)
+			return resp.Approved, nil
+		case <-ctx.Done():
+			a.pendingMu.Lock()
+			delete(a.pendingToolCalls, req.ID)
+			a.pendingMu.Unlock()
+			_ = a.approvalStore.Delete(context.Background(), req.ID)
+			logging.IncrMetric("tool_approvals_cancelled_total")
+			return false, ctx.Err()
+		case <-timer.C:
+			a.pendingMu.Lock()
+			delete(a.pendingToolCalls, req.ID)
+			a.pendingMu.Unlock()
+			_ = a.approvalStore.Delete(context.Background(), req.ID)
+			logging.IncrMetric("tool_approvals_timeout_total")
+			return false, errors.New("tool approval timeout")
+		case <-ticker.C:
+			status, found, err := a.approvalStore.GetStatus(ctx, sessionID, req.ID)
+			if err != nil {
+				return false, err
+			}
+			if found && status == ApprovalApproved {
+				_ = a.approvalStore.Delete(context.Background(), req.ID)
+				return true, nil
+			}
+			if found && status == ApprovalRejected {
+				_ = a.approvalStore.Delete(context.Background(), req.ID)
+				return false, nil
+			}
+		}
 	}
 }
 
@@ -642,11 +698,20 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			}
 			switch policyResult.Decision {
 			case tools.PolicyAllow:
-				logging.IncrMetric("tool_policy_allow_total")
+				logging.IncrMetricWithLabels("tool_policy_decision_total", map[string]string{
+					"tool_name": functionCall.Name,
+					"decision":  string(tools.PolicyAllow),
+				})
 			case tools.PolicyRequireApproval:
-				logging.IncrMetric("tool_policy_require_approval_total")
+				logging.IncrMetricWithLabels("tool_policy_decision_total", map[string]string{
+					"tool_name": functionCall.Name,
+					"decision":  string(tools.PolicyRequireApproval),
+				})
 			case tools.PolicyDeny:
-				logging.IncrMetric("tool_policy_deny_total")
+				logging.IncrMetricWithLabels("tool_policy_decision_total", map[string]string{
+					"tool_name": functionCall.Name,
+					"decision":  string(tools.PolicyDeny),
+				})
 			}
 			if policyResult.Decision == tools.PolicyDeny {
 				logging.IncrMetric("tool_calls_denied")
@@ -663,7 +728,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			}
 
 			// 执行工具
-			logging.IncrMetric("tool_calls_total")
+			logging.IncrMetricWithLabels("tool_calls_total", map[string]string{"tool_name": functionCall.Name})
 			if runCtx.Limits.MaxToolCalls > 0 && runCtx.Stats.ToolCalls >= runCtx.Limits.MaxToolCalls {
 				logging.IncrMetric("agent_calls_errors")
 				runCtx.Enter(agentruntime.StateFailed)
@@ -691,7 +756,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			toolResult, err := a.toolGateway.Execute(ctx, functionCall.Name, functionCall.Arguments)
 			toolProcessingTime := time.Since(toolStartTime).Milliseconds()
 			if err != nil {
-				logging.IncrMetric("tool_calls_errors")
+				logging.IncrMetricWithLabels("tool_calls_errors", map[string]string{"tool_name": functionCall.Name})
 				logger.Error("工具执行失败", map[string]interface{}{
 					"tool_name":       functionCall.Name,
 					"error":           err.Error(),
@@ -950,11 +1015,20 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			}
 			switch policyResult.Decision {
 			case tools.PolicyAllow:
-				logging.IncrMetric("tool_policy_allow_total")
+				logging.IncrMetricWithLabels("tool_policy_decision_total", map[string]string{
+					"tool_name": functionCall.Name,
+					"decision":  string(tools.PolicyAllow),
+				})
 			case tools.PolicyRequireApproval:
-				logging.IncrMetric("tool_policy_require_approval_total")
+				logging.IncrMetricWithLabels("tool_policy_decision_total", map[string]string{
+					"tool_name": functionCall.Name,
+					"decision":  string(tools.PolicyRequireApproval),
+				})
 			case tools.PolicyDeny:
-				logging.IncrMetric("tool_policy_deny_total")
+				logging.IncrMetricWithLabels("tool_policy_decision_total", map[string]string{
+					"tool_name": functionCall.Name,
+					"decision":  string(tools.PolicyDeny),
+				})
 			}
 			if policyResult.Decision == tools.PolicyDeny {
 				logger.Warn("工具调用被策略拒绝", map[string]interface{}{

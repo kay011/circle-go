@@ -38,6 +38,14 @@ rate_limit:
   requests_per_minute: 60   # 每分钟请求数
   burst_size: 10            # 突发容量
 
+# Redis 配置（用于审批状态等分布式状态）
+redis:
+  enabled: false
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  prefix: "circle_go"
+
 # 文件操作配置
 file_tool:
   allowed_directory: "./data"  # 允许的文件目录

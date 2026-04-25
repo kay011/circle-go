@@ -17,7 +17,11 @@ import (
 	"circle-go/internal/mcp"
 	"circle-go/internal/memory"
 	"circle-go/internal/tools"
+
+	"github.com/redis/go-redis/v9"
 )
+
+const appVersion = "1.0.0"
 
 // writeSSEData 按 SSE 规范写入文本：拆成多行 data:，由浏览器拼成完整 payload，避免单行 data 内含换行导致前端只收到首行。
 func writeSSEData(w http.ResponseWriter, text string) {
@@ -79,6 +83,15 @@ func NewServer(cfg *config.Config) *Server {
 	agentInstance.SetPolicyEngine(tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains))
 	agentInstance.SetMemoryManager(memoryManager)
 
+	if cfg.Redis.Enabled {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     cfg.Redis.Addr,
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+		agentInstance.SetApprovalStore(agent.NewRedisApprovalStore(rdb, cfg.Redis.Prefix))
+	}
+
 	// 设置 LLM 到记忆管理器
 	memoryManager.SetLLM(llmClient)
 
@@ -133,6 +146,9 @@ func (s *Server) Start() error {
 	// 健康检查端点（不限速）
 	http.HandleFunc("/health", s.handleHealth)
 	http.HandleFunc("/ready", s.handleReady)
+	if s.config.Metrics.Enabled {
+		http.HandleFunc(s.config.Metrics.Path, s.handleMetrics)
+	}
 
 	// 注册路由（带速率限制）
 	http.HandleFunc("/api/auth/register", s.rateLimiter.Middleware(s.handleRegister))
@@ -177,12 +193,12 @@ func (s *Server) Stop() error {
 // handleChat 处理聊天请求
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 增加请求计数
-	logging.IncrMetric("chat_requests_total")
+	logging.IncrMetricWithLabels("chat_requests_total", map[string]string{"endpoint": "/api/chat"})
 	startTime := time.Now()
 
 	if r.Method != http.MethodPost {
-		logging.IncrMetric("chat_requests_errors")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		logging.IncrMetricWithLabels("chat_requests_errors", map[string]string{"endpoint": "/api/chat"})
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
 			"path":   r.URL.Path,
@@ -197,8 +213,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logging.IncrMetric("chat_requests_errors")
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		logging.IncrMetricWithLabels("chat_requests_errors", map[string]string{"endpoint": "/api/chat"})
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, "Invalid request body", false)
 		s.logger.Error("Invalid request", map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -236,8 +252,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 运行Agent
 	response, err := s.agent.Run(r.Context(), req.SessionID, req.Message)
 	if err != nil {
-		logging.IncrMetric("chat_requests_errors")
-		http.Error(w, fmt.Sprintf("Failed to process message: %v", err), http.StatusInternalServerError)
+		logging.IncrMetricWithLabels("chat_requests_errors", map[string]string{"endpoint": "/api/chat"})
+		writeAPIError(w, http.StatusInternalServerError, ErrAgentRunFailed, "Failed to process message", true)
 		s.logger.Error("Failed to process message", map[string]interface{}{
 			"error":           err.Error(),
 			"session_id":      req.SessionID,
@@ -256,6 +272,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 
 	processingTime := time.Since(startTime).Milliseconds()
+	logging.ObserveMetricWithLabels("chat_request_duration_seconds", map[string]string{"endpoint": "/api/chat"}, float64(processingTime)/1000.0)
 	s.logger.Info("Chat request processed", map[string]interface{}{
 		"session_id":      req.SessionID,
 		"response_length": len(response),
@@ -264,7 +281,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// 记录处理时间
 	if processingTime > 5000 {
-		logging.IncrMetric("chat_requests_slow")
+		logging.IncrMetricWithLabels("chat_requests_slow", map[string]string{"endpoint": "/api/chat"})
 		s.logger.Warn("Slow chat request", map[string]interface{}{
 			"session_id":      req.SessionID,
 			"processing_time": processingTime,
@@ -275,12 +292,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // handleChatWithPlanning 处理带任务规划的聊天请求
 func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) {
 	// 增加请求计数
-	logging.IncrMetric("chat_planning_requests_total")
+	logging.IncrMetricWithLabels("chat_planning_requests_total", map[string]string{"endpoint": "/api/chat/plan"})
 	startTime := time.Now()
 
 	if r.Method != http.MethodPost {
-		logging.IncrMetric("chat_planning_requests_errors")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		logging.IncrMetricWithLabels("chat_planning_requests_errors", map[string]string{"endpoint": "/api/chat/plan"})
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
 		return
 	}
 
@@ -291,8 +308,8 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logging.IncrMetric("chat_planning_requests_errors")
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		logging.IncrMetricWithLabels("chat_planning_requests_errors", map[string]string{"endpoint": "/api/chat/plan"})
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, "Invalid request body", false)
 		return
 	}
 
@@ -310,8 +327,8 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 	// 使用任务规划运行Agent
 	response, err := s.agent.RunWithPlanning(r.Context(), req.SessionID, req.Message)
 	if err != nil {
-		logging.IncrMetric("chat_planning_requests_errors")
-		http.Error(w, fmt.Sprintf("Failed to process message: %v", err), http.StatusInternalServerError)
+		logging.IncrMetricWithLabels("chat_planning_requests_errors", map[string]string{"endpoint": "/api/chat/plan"})
+		writeAPIError(w, http.StatusInternalServerError, ErrAgentRunFailed, "Failed to process message", true)
 		return
 	}
 
@@ -325,6 +342,7 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 	})
 
 	processingTime := time.Since(startTime).Milliseconds()
+	logging.ObserveMetricWithLabels("chat_planning_request_duration_seconds", map[string]string{"endpoint": "/api/chat/plan"}, float64(processingTime)/1000.0)
 	s.logger.Info("Planning chat processed", map[string]interface{}{
 		"session_id":      req.SessionID,
 		"response_length": len(response),
@@ -335,7 +353,7 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 // handleToolCall 处理工具调用确认请求
 func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
 			"path":   r.URL.Path,
@@ -345,13 +363,14 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 
 	// 解析请求
 	var req struct {
-		SessionID  string `json:"session_id"`
-		ToolCallID string `json:"tool_call_id"`
-		Approved   bool   `json:"approved"`
+		SessionID     string `json:"session_id"`
+		ToolCallID    string `json:"tool_call_id"`
+		ApprovalToken string `json:"approval_token"`
+		Approved      bool   `json:"approved"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, "Invalid request body", false)
 		s.logger.Error("Invalid request", map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -364,13 +383,13 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		"approved":     req.Approved,
 	})
 
-	if err := s.agent.ResolveToolCallApproval(req.SessionID, req.ToolCallID, req.Approved); err != nil {
+	if err := s.agent.ResolveToolCallApproval(req.SessionID, req.ToolCallID, req.ApprovalToken, req.Approved); err != nil {
 		s.logger.Warn("Tool call confirmation rejected", map[string]interface{}{
 			"session_id":   req.SessionID,
 			"tool_call_id": req.ToolCallID,
 			"error":        err.Error(),
 		})
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrToolApproval, err.Error(), false)
 		return
 	}
 
@@ -386,12 +405,12 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 // handleChatStream 处理流式聊天请求
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// 增加请求计数
-	logging.IncrMetric("chat_stream_requests_total")
+	logging.IncrMetricWithLabels("chat_stream_requests_total", map[string]string{"endpoint": "/api/chat/stream"})
 	startTime := time.Now()
 
 	if r.Method != http.MethodPost {
-		logging.IncrMetric("chat_stream_requests_errors")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		logging.IncrMetricWithLabels("chat_stream_requests_errors", map[string]string{"endpoint": "/api/chat/stream"})
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
 		s.logger.Warn("Method not allowed", map[string]interface{}{
 			"method": r.Method,
 			"path":   r.URL.Path,
@@ -406,8 +425,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logging.IncrMetric("chat_stream_requests_errors")
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		logging.IncrMetricWithLabels("chat_stream_requests_errors", map[string]string{"endpoint": "/api/chat/stream"})
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, "Invalid request body", false)
 		s.logger.Error("Invalid request", map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -454,8 +473,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if runErr != nil {
-		logging.IncrMetric("chat_stream_requests_errors")
-		writeSSEData(w, fmt.Sprintf("Error: %v", runErr))
+		logging.IncrMetricWithLabels("chat_stream_requests_errors", map[string]string{"endpoint": "/api/chat/stream"})
+		writeSSEError(w, ErrStreamRunFailed, runErr.Error(), true)
 		s.logger.Error("Stream chat error", map[string]interface{}{
 			"error":           runErr.Error(),
 			"session_id":      req.SessionID,
@@ -469,6 +488,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	writeSSEData(w, "[DONE]")
 
 	processingTime := time.Since(startTime).Milliseconds()
+	logging.ObserveMetricWithLabels("chat_stream_request_duration_seconds", map[string]string{"endpoint": "/api/chat/stream"}, float64(processingTime)/1000.0)
 	s.logger.Info("Stream chat request processed", map[string]interface{}{
 		"session_id":      req.SessionID,
 		"processing_time": processingTime,
@@ -476,7 +496,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	// 记录处理时间
 	if processingTime > 5000 {
-		logging.IncrMetric("chat_stream_requests_slow")
+		logging.IncrMetricWithLabels("chat_stream_requests_slow", map[string]string{"endpoint": "/api/chat/stream"})
 		s.logger.Warn("Slow stream chat request", map[string]interface{}{
 			"session_id":      req.SessionID,
 			"processing_time": processingTime,
@@ -487,7 +507,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 // handleSessions 处理会话列表请求
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
 		return
 	}
 	sessions := s.memoryManager.ListSessions()
@@ -501,14 +521,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 // handleSession 处理单个会话请求
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
 		return
 	}
 	sessionID := r.URL.Path[len("/api/sessions/"):]
 
 	session := s.memoryManager.GetSession(sessionID)
 	if session == nil {
-		http.Error(w, "Session not found", http.StatusNotFound)
+		writeAPIError(w, http.StatusNotFound, ErrSessionNotFound, "Session not found", false)
 		return
 	}
 
@@ -521,14 +541,14 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
+			writeAPIError(w, http.StatusUnauthorized, ErrUnauthorized, "missing authorization header", false)
 			return
 		}
 
 		// 提取 token
 		const prefix = "Bearer "
 		if len(authHeader) < len(prefix) || authHeader[:len(prefix)] != prefix {
-			http.Error(w, `{"error":"invalid authorization format"}`, http.StatusUnauthorized)
+			writeAPIError(w, http.StatusUnauthorized, ErrUnauthorized, "invalid authorization format", false)
 			return
 		}
 
@@ -537,7 +557,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// 验证 token
 		claims, err := s.authManager.ValidateToken(tokenString)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusUnauthorized)
+			writeAPIError(w, http.StatusUnauthorized, ErrUnauthorized, err.Error(), false)
 			return
 		}
 
@@ -552,7 +572,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 // handleRegister 处理用户注册
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "method not allowed", false)
 		return
 	}
 
@@ -564,25 +584,25 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, "invalid request body", false)
 		return
 	}
 
 	// 验证参数
 	if req.Username == "" || req.Password == "" || req.Email == "" {
-		http.Error(w, `{"error":"missing required fields"}`, http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrValidationFailed, "missing required fields", false)
 		return
 	}
 
 	// 验证用户名格式
 	if len(req.Username) < 3 || len(req.Username) > 50 {
-		http.Error(w, `{"error":"username must be between 3 and 50 characters"}`, http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrValidationFailed, "username must be between 3 and 50 characters", false)
 		return
 	}
 
 	// 验证邮箱格式
 	if !isValidEmail(req.Email) {
-		http.Error(w, `{"error":"invalid email format"}`, http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrValidationFailed, "invalid email format", false)
 		return
 	}
 
@@ -593,7 +613,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			"error":    err.Error(),
 			"username": req.Username,
 		})
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrValidationFailed, err.Error(), false)
 		return
 	}
 
@@ -611,7 +631,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // handleLogin 处理用户登录
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "method not allowed", false)
 		return
 	}
 
@@ -622,13 +642,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, "invalid request body", false)
 		return
 	}
 
 	// 验证参数
 	if req.Username == "" || req.Password == "" {
-		http.Error(w, `{"error":"missing required fields"}`, http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, ErrValidationFailed, "missing required fields", false)
 		return
 	}
 
@@ -639,7 +659,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			"error":    err.Error(),
 			"username": req.Username,
 		})
-		http.Error(w, `{"error":"invalid username or password"}`, http.StatusUnauthorized)
+		writeAPIError(w, http.StatusUnauthorized, ErrUnauthorized, "invalid username or password", false)
 		return
 	}
 
@@ -658,14 +678,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handleHealth 健康检查端点
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "method not allowed", false)
 		return
 	}
 
 	health := map[string]interface{}{
 		"status":    "healthy",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"version":   "1.0.0",
+		"version":   appVersion,
 		"uptime":    time.Since(s.startTime).String(),
 	}
 
@@ -676,7 +696,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleReady 就绪检查端点
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "method not allowed", false)
 		return
 	}
 
@@ -720,6 +740,25 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleMetrics 暴露 Prometheus 文本格式指标。
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "method not allowed", false)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	payload := logging.RenderPrometheusMetrics()
+	if payload == "" {
+		// 保持端点可用，即使当前尚无业务指标。
+		payload = "# no_metrics 0\n"
+	}
+	uptimeSeconds := time.Since(s.startTime).Seconds()
+	payload += fmt.Sprintf("# TYPE process_uptime_seconds gauge\nprocess_uptime_seconds %.3f\n", uptimeSeconds)
+	payload += fmt.Sprintf("# TYPE circle_go_build_info gauge\ncircle_go_build_info{version=\"%s\"} 1\n", appVersion)
+	_, _ = w.Write([]byte(payload))
 }
 
 // isValidEmail 简单的邮箱格式验证

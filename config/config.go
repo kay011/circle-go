@@ -13,6 +13,7 @@ type Config struct {
 	Server       ServerConfig       `yaml:"server"`
 	LLM          LLMConfig          `yaml:"llm"`
 	Memory       MemoryConfig       `yaml:"memory"`
+	Redis        RedisConfig        `yaml:"redis"`
 	RateLimit    RateLimitConfig    `yaml:"rate_limit"`
 	FileTool     FileToolConfig     `yaml:"file_tool"`
 	Search       SearchConfig       `yaml:"search"`
@@ -99,6 +100,15 @@ type LoggingConfig struct {
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path"`
+}
+
+// RedisConfig Redis 配置
+type RedisConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Addr     string `yaml:"addr"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
+	Prefix   string `yaml:"prefix"`
 }
 
 // AgentRuntimeConfig Agent 运行时预算配置
@@ -208,6 +218,14 @@ func setDefaults(cfg *Config) {
 	// Rate Limit defaults
 	if !cfg.RateLimit.Enabled {
 		cfg.RateLimit.Enabled = true
+	}
+
+	// Redis defaults
+	if cfg.Redis.Addr == "" {
+		cfg.Redis.Addr = "localhost:6379"
+	}
+	if cfg.Redis.Prefix == "" {
+		cfg.Redis.Prefix = "circle_go"
 	}
 	if cfg.RateLimit.RequestsPerMinute == 0 {
 		cfg.RateLimit.RequestsPerMinute = 60
@@ -330,6 +348,10 @@ func validate(cfg *Config) error {
 	}
 	if !validLevels[cfg.Logging.Level] {
 		return fmt.Errorf("invalid logging level: %s (must be debug, info, warn, or error)", cfg.Logging.Level)
+	}
+
+	if cfg.Redis.Enabled && cfg.Redis.Addr == "" {
+		return fmt.Errorf("redis addr cannot be empty when redis is enabled")
 	}
 
 	// 验证 Agent 运行时预算

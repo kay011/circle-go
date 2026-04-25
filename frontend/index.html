@@ -1091,6 +1091,16 @@
             return null;
         }
 
+        function tryParseErrorPayload(data) {
+            const t = (data || '').trim();
+            if (!t.startsWith('{') || t.indexOf('"error"') === -1) return null;
+            try {
+                const o = JSON.parse(t);
+                if (o && o.error && typeof o.error === 'object' && o.error.code) return o.error;
+            } catch (_) {}
+            return null;
+        }
+
         // 隐藏欢迎界面
         function hideWelcomeScreen() {
             welcomeScreen.style.display = 'none';
@@ -1351,6 +1361,7 @@
                         body: JSON.stringify({
                             session_id: currentSessionId,
                             tool_call_id: toolCall.id,
+                            approval_token: toolCall.approval_token,
                             approved
                         })
                     });
@@ -1526,7 +1537,16 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('网络响应错误');
+                    let errPayload = null;
+                    try {
+                        errPayload = await response.json();
+                    } catch (_) {}
+                    if (errPayload && errPayload.error) {
+                        const e = errPayload.error;
+                        const retryHint = e.retryable ? '（可重试）' : '';
+                        throw new Error(`[${e.code}] ${e.message}${retryHint}`);
+                    }
+                    throw new Error(`网络响应错误（HTTP ${response.status}）`);
                 }
 
                 // 移除打字指示器
@@ -1580,6 +1600,17 @@
                         closeTextSegment();
                         finalizeUnifiedMessage();
                         const { bubble } = addMessage('ai', data, false, 'plain');
+                        bubble.classList.add('stream-error');
+                        return;
+                    }
+
+                    const apiErr = tryParseErrorPayload(data);
+                    if (apiErr) {
+                        closeTextSegment();
+                        finalizeUnifiedMessage();
+                        const retryHint = apiErr.retryable ? '（可重试）' : '';
+                        const msg = `请求失败 [${apiErr.code}]：${apiErr.message}${retryHint}`;
+                        const { bubble } = addMessage('ai', msg, false, 'plain');
                         bubble.classList.add('stream-error');
                         return;
                     }

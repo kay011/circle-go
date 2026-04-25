@@ -11,6 +11,7 @@
 - **工具网关治理**：统一参数校验、超时控制、审计日志
 - **策略引擎**：支持 allow / require_approval / deny 三态决策
 - **阻塞式人工审批**：高风险工具调用可挂起等待用户确认
+- **投资分析工具**：支持股票/基金名称或代码分析，输出量化评分与结论
 - **MCP 协议**：支持 Model Context Protocol，与其他系统集成
 - **用户认证**：支持用户注册和登录
 - **流式响应**：支持实时流式聊天体验
@@ -182,6 +183,12 @@ flowchart TD
 - 会话、审批、任务状态外置到 Redis/PostgreSQL，支持多副本部署。
 - 记忆分层：短期缓存（Redis）+ 长期事实（PostgreSQL）+ 语义检索（Vector DB）。
 - 统一可观测性：日志、指标、链路追踪通过 OTel 汇聚。
+
+## 前端界面截图
+
+> 以下截图用于展示当前前端首页与快捷入口布局。
+
+![前端界面总览](docs/screenshots/frontend-overview.png)
 
 ## 快速开始
 
@@ -481,6 +488,31 @@ circle_go_build_info{version="1.0.0"} 1
 - `url`: 目标 URL（必须是 `http://` 或 `https://`）
 - `headers`: 可选，请求头（字符串）
 - `body`: 可选，请求体（字符串）
+
+### 5. 投资分析工具 (`investment_analyzer`)
+
+**参数**：
+
+- `name_or_code`: 股票/基金名称或代码（必填），例如 `600519`、`161725`、`贵州茅台`
+- `asset_type`: `auto` / `stock` / `fund`（可选，默认 `auto`）
+
+**特点**：
+
+- 支持股票和基金公开行情分析与量化评分
+- 股票链路具备主源重试与备用源自动切换
+- 结果带免责声明：仅供研究，不构成投资建议
+
+**示例**：
+
+```json
+{
+  "name": "investment_analyzer",
+  "arguments": {
+    "name_or_code": "600519",
+    "asset_type": "stock"
+  }
+}
+```
 
 ## 工具治理与审批
 

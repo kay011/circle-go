@@ -501,24 +501,34 @@ func (a *Agent) newRunContext(sessionID string) *agentruntime.RunContext {
 
 // isToolCallDuplicate 检查工具调用是否重复
 func (a *Agent) isToolCallDuplicate(toolCall ToolCall) bool {
-	for _, previousCall := range a.toolCallHistory {
-		if previousCall.Name == toolCall.Name {
-			// 检查参数是否相同
-			if len(previousCall.Arguments) == len(toolCall.Arguments) {
-				allMatch := true
-				for key, value := range previousCall.Arguments {
-					if toolCall.Arguments[key] != value {
-						allMatch = false
-						break
-					}
-				}
-				if allMatch {
-					return true
-				}
-			}
+	// 仅在“连续重复调用”达到阈值时拦截，避免把正常重试误判为循环。
+	const repeatThreshold = 2
+	if len(a.toolCallHistory) < repeatThreshold {
+		return false
+	}
+
+	for i := 0; i < repeatThreshold; i++ {
+		prev := a.toolCallHistory[len(a.toolCallHistory)-1-i]
+		if !sameToolCall(prev, toolCall) {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+func sameToolCall(aCall, bCall ToolCall) bool {
+	if aCall.Name != bCall.Name {
+		return false
+	}
+	if len(aCall.Arguments) != len(bCall.Arguments) {
+		return false
+	}
+	for key, value := range aCall.Arguments {
+		if bCall.Arguments[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // shouldAppendUserMessage 在 API 层已把本轮用户消息写入短期记忆时为 false，避免 LLM 收到重复的用户消息。
@@ -541,6 +551,19 @@ func streamResponse(response string, callback func(chunk string) error) error {
 		return err
 	}
 	return nil
+}
+
+func isTransientToolError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "状态码: 502") ||
+		strings.Contains(msg, "状态码: 503") ||
+		strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "temporarily unavailable") ||
+		strings.Contains(msg, "临时不可用")
 }
 
 // Run 运行Agent
@@ -764,6 +787,9 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 					"trace_id":        runCtx.TraceID,
 					"processing_time": toolProcessingTime,
 				})
+				if isTransientToolError(err) {
+					return fmt.Sprintf("工具 %s 的下游数据源暂时不可用（%v），请稍后重试。", functionCall.Name, err), nil
+				}
 				toolResult = fmt.Sprintf("Error: %v", err)
 			} else {
 				logger.Info("工具执行成功", map[string]interface{}{
@@ -1153,6 +1179,13 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 					"duration":  toolDuration.Milliseconds(),
 					"trace_id":  runCtx.TraceID,
 				})
+				if isTransientToolError(err) {
+					msg := fmt.Sprintf("工具 %s 的下游数据源暂时不可用（%v），请稍后重试。", functionCall.Name, err)
+					if cerr := callback(msg); cerr != nil {
+						return "", cerr
+					}
+					return msg, nil
+				}
 				toolResult = fmt.Sprintf("Error: %v", err)
 			} else {
 				logger.Info("工具执行成功", map[string]interface{}{

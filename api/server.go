@@ -67,6 +67,7 @@ func NewServer(cfg *config.Config) *Server {
 	toolManager.Register(tools.NewWebSearchTool(cfg.Search.SearxInstances))
 	toolManager.Register(tools.NewFileTool())
 	toolManager.Register(tools.NewHTTPClientTool()) // 新增：HTTP客户端工具
+	toolManager.Register(tools.NewInvestmentAnalyzerTool())
 
 	// 初始化记忆管理器
 	memoryManager := memory.NewMemoryManager(cfg.Memory.ShortTermSize, cfg.Memory.LongTermPath)

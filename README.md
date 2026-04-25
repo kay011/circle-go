@@ -140,7 +140,7 @@ flowchart TD
     RUNTIME --> TGW[Tool Gateway]
     TGW --> TOOLS[Internal / External Tools]
 
-    HITL --> APPROVAL_API[/api/chat/toolcall]
+    HITL --> APPROVAL_API[Toolcall Approval API]
     APPROVAL_API --> HITL
 
     ORCH --> QUEUE[Task Queue]

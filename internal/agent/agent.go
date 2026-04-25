@@ -359,6 +359,13 @@ func (a *Agent) SetPolicyEngine(engine tools.PolicyEngine) {
 	}
 }
 
+// SetApprovalTimeout 设置工具审批等待超时（<=0 忽略）。
+func (a *Agent) SetApprovalTimeout(timeout time.Duration) {
+	if timeout > 0 {
+		a.approvalTimeout = timeout
+	}
+}
+
 // ResolveToolCallApproval 处理外部的工具审批结果。
 func (a *Agent) ResolveToolCallApproval(sessionID, toolCallID string, approved bool) error {
 	a.pendingMu.Lock()
@@ -375,6 +382,11 @@ func (a *Agent) ResolveToolCallApproval(sessionID, toolCallID string, approved b
 	a.pendingMu.Unlock()
 
 	pending.response <- ToolCallResponse{Approved: approved}
+	if approved {
+		logging.IncrMetric("tool_approvals_approved_total")
+	} else {
+		logging.IncrMetric("tool_approvals_rejected_total")
+	}
 	return nil
 }
 
@@ -411,11 +423,13 @@ func (a *Agent) waitForToolApproval(ctx context.Context, sessionID string, req T
 		a.pendingMu.Lock()
 		delete(a.pendingToolCalls, req.ID)
 		a.pendingMu.Unlock()
+		logging.IncrMetric("tool_approvals_cancelled_total")
 		return false, ctx.Err()
 	case <-timer.C:
 		a.pendingMu.Lock()
 		delete(a.pendingToolCalls, req.ID)
 		a.pendingMu.Unlock()
+		logging.IncrMetric("tool_approvals_timeout_total")
 		return false, errors.New("tool approval timeout")
 	}
 }
@@ -625,6 +639,14 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			policyResult := tools.PolicyResult{Decision: tools.PolicyAllow}
 			if a.policyEngine != nil {
 				policyResult = a.policyEngine.Evaluate(ctx, functionCall.Name, functionCall.Arguments)
+			}
+			switch policyResult.Decision {
+			case tools.PolicyAllow:
+				logging.IncrMetric("tool_policy_allow_total")
+			case tools.PolicyRequireApproval:
+				logging.IncrMetric("tool_policy_require_approval_total")
+			case tools.PolicyDeny:
+				logging.IncrMetric("tool_policy_deny_total")
 			}
 			if policyResult.Decision == tools.PolicyDeny {
 				logging.IncrMetric("tool_calls_denied")
@@ -925,6 +947,14 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			policyResult := tools.PolicyResult{Decision: tools.PolicyAllow}
 			if a.policyEngine != nil {
 				policyResult = a.policyEngine.Evaluate(ctx, functionCall.Name, functionCall.Arguments)
+			}
+			switch policyResult.Decision {
+			case tools.PolicyAllow:
+				logging.IncrMetric("tool_policy_allow_total")
+			case tools.PolicyRequireApproval:
+				logging.IncrMetric("tool_policy_require_approval_total")
+			case tools.PolicyDeny:
+				logging.IncrMetric("tool_policy_deny_total")
 			}
 			if policyResult.Decision == tools.PolicyDeny {
 				logger.Warn("工具调用被策略拒绝", map[string]interface{}{

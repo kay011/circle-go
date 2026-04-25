@@ -126,6 +126,62 @@ flowchart TD
 10. API 服务器返回响应给用户
 11. 监控层记录系统运行状态和指标
 
+### 工业级目标架构 v2
+
+```mermaid
+flowchart TD
+    Client[Web / App Client] --> APIGW[API Gateway]
+    APIGW --> API[Circle-Go API Service]
+
+    API --> ORCH[Agent Orchestrator]
+    ORCH --> RUNTIME[Agent Runtime]
+    ORCH --> PLAN[Planner / Reflector]
+
+    RUNTIME --> POLICY[Policy Engine]
+    RUNTIME --> HITL[HITL Approval Manager]
+    RUNTIME --> TGW[Tool Gateway]
+    TGW --> TOOLS[Internal / External Tools]
+
+    HITL --> APPROVAL_API[/api/chat/toolcall]
+    APPROVAL_API --> HITL
+
+    ORCH --> QUEUE[Task Queue]
+    QUEUE --> WORKER[Async Worker Pool]
+    WORKER --> TGW
+
+    ORCH --> REDIS[(Redis)]
+    REDIS --> ORCH
+    ORCH --> PG[(PostgreSQL)]
+    ORCH --> VDB[(Vector DB)]
+    ORCH --> OBJ[(Object Storage)]
+
+    API --> MEM[Memory Service]
+    MEM --> REDIS
+    MEM --> PG
+    MEM --> VDB
+
+    API --> OBS[OpenTelemetry Collector]
+    ORCH --> OBS
+    TGW --> OBS
+    OBS --> LOGS[Logs Backend]
+    OBS --> METRICS[Metrics Backend]
+    OBS --> TRACES[Traces Backend]
+
+    classDef core fill:#E8F3FF,stroke:#4A90E2,stroke-width:1px;
+    classDef data fill:#FFF7E6,stroke:#F5A623,stroke-width:1px;
+    classDef obs fill:#F3E8FF,stroke:#9B59B6,stroke-width:1px;
+
+    class API,ORCH,RUNTIME,PLAN,POLICY,HITL,TGW,WORKER core;
+    class REDIS,PG,VDB,OBJ,QUEUE data;
+    class OBS,LOGS,METRICS,TRACES obs;
+```
+
+**v2 设计要点**：
+- Agent 运行与工具执行解耦，支持异步任务和重试恢复。
+- 会话、审批、任务状态外置到 Redis/PostgreSQL，支持多副本部署。
+- 记忆分层：短期缓存（Redis）+ 长期事实（PostgreSQL）+ 语义检索（Vector DB）。
+- 统一可观测性：日志、指标、链路追踪通过 OTel 汇聚。
+
 ## 快速开始
 
 ### 安装依赖
@@ -167,6 +223,9 @@ agent_runtime:
   max_steps: 5
   max_tool_calls: 20
   max_duration: 2m
+  tool_timeout: 20s
+  approval_timeout: 2m
+  trusted_http_domains: []
 ```
 
 **注意**：请确保不要将包含实际API密钥的config.yaml文件提交到版本控制系统，该文件已在.gitignore中被忽略。
@@ -382,7 +441,14 @@ go run cmd/api/main.go
   - 非 `GET` 请求 -> `require_approval`
   - `GET` 非可信域名（配置了可信域名时）-> `require_approval`
 
+可通过配置强化策略：
+
+- `agent_runtime.tool_timeout`：单次工具调用超时
+- `agent_runtime.approval_timeout`：审批等待超时
+- `agent_runtime.trusted_http_domains`：HTTP 工具可信域名白名单（留空表示不启用域名白名单）
+
 > 说明：阻塞审批链路基于流式接口设计，建议使用 `/api/chat/stream` 体验完整审批流程。
+> 前端已内置审批交互卡片：收到工具调用后可直接在聊天窗口点击「批准执行 / 拒绝」。
 
 ## 项目结构
 

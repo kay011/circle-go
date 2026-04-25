@@ -499,6 +499,82 @@
             margin-right: 4px;
         }
 
+        .tool-approval-card {
+            border: 1px solid #d9e2ff;
+            background: #f7faff;
+            border-radius: 12px;
+            padding: 12px;
+            margin: 6px 0;
+        }
+
+        .tool-approval-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1f2d5c;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .tool-approval-desc {
+            font-size: 13px;
+            color: #3d4b73;
+            margin-bottom: 10px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .tool-approval-args {
+            margin: 0 0 10px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            background: #eef3ff;
+            border: 1px solid #dbe6ff;
+            border-radius: 8px;
+            padding: 10px;
+            max-height: 180px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .tool-approval-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .tool-approval-btn {
+            border: none;
+            border-radius: 8px;
+            padding: 7px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tool-approval-btn.approve {
+            background: #1677ff;
+            color: #fff;
+        }
+
+        .tool-approval-btn.reject {
+            background: #fff;
+            color: #cf1322;
+            border: 1px solid #ffccc7;
+        }
+
+        .tool-approval-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .tool-approval-status {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
         /* 工具执行结果：可折叠 */
         .tool-result-collapsible {
             border: 1px solid var(--border-color);
@@ -888,6 +964,7 @@
         let currentSessionId = generateSessionId();
         let isStreaming = false;
         let messages = []; // 存储所有消息
+        const pendingToolApprovals = new Map();
         const chatContainer = document.getElementById('chatContainer');
         const messagesWrapper = document.getElementById('messagesWrapper');
         const welcomeScreen = document.getElementById('welcomeScreen');
@@ -1208,6 +1285,7 @@
             }
             if (!data || !data.tool_call || typeof data.tool_call !== 'object') return;
             ensureThinkingChip();
+            renderToolApprovalCard(data.tool_call);
         }
 
         // 工具执行结果：不向用户展示原始输出
@@ -1228,6 +1306,78 @@
             }
             
             return answerSection;
+        }
+
+        function renderToolApprovalCard(toolCall) {
+            if (!toolCall || !toolCall.id) return;
+            if (pendingToolApprovals.has(toolCall.id)) return;
+            if (!currentUnifiedContainer) createUnifiedMessage();
+            pendingToolApprovals.set(toolCall.id, 'pending');
+
+            const card = document.createElement('div');
+            card.className = 'tool-approval-card';
+            card.dataset.toolCallId = toolCall.id;
+
+            const safeName = escapeHtml(toolCall.name || 'unknown');
+            const safeReason = escapeHtml(toolCall.reasoning || '模型请求调用工具以继续完成任务');
+            const safeArgs = escapeHtml(JSON.stringify(toolCall.arguments || {}, null, 2));
+
+            card.innerHTML = `
+                <div class="tool-approval-title">
+                    <i class="fas fa-shield-alt"></i>
+                    <span>工具调用审批：${safeName}</span>
+                </div>
+                <div class="tool-approval-desc">${safeReason}</div>
+                <pre class="tool-approval-args">${safeArgs}</pre>
+                <div class="tool-approval-actions">
+                    <button class="tool-approval-btn approve">批准执行</button>
+                    <button class="tool-approval-btn reject">拒绝</button>
+                </div>
+                <div class="tool-approval-status">等待你的操作...</div>
+            `;
+
+            const approveBtn = card.querySelector('.tool-approval-btn.approve');
+            const rejectBtn = card.querySelector('.tool-approval-btn.reject');
+            const statusEl = card.querySelector('.tool-approval-status');
+
+            async function submitApproval(approved) {
+                approveBtn.disabled = true;
+                rejectBtn.disabled = true;
+                statusEl.textContent = approved ? '正在提交批准...' : '正在提交拒绝...';
+                try {
+                    const resp = await fetch('/api/chat/toolcall', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            session_id: currentSessionId,
+                            tool_call_id: toolCall.id,
+                            approved
+                        })
+                    });
+                    if (!resp.ok) {
+                        const errText = await resp.text();
+                        throw new Error(errText || ('HTTP ' + resp.status));
+                    }
+                    statusEl.textContent = approved ? '已批准，等待工具执行结果...' : '已拒绝，等待模型继续响应...';
+                    pendingToolApprovals.set(toolCall.id, approved ? 'approved' : 'rejected');
+                } catch (e) {
+                    statusEl.textContent = '审批提交失败，请重试';
+                    approveBtn.disabled = false;
+                    rejectBtn.disabled = false;
+                    pendingToolApprovals.set(toolCall.id, 'pending');
+                    console.error('tool approval failed:', e);
+                }
+            }
+
+            approveBtn.addEventListener('click', () => submitApproval(true));
+            rejectBtn.addEventListener('click', () => submitApproval(false));
+
+            if (answerSection && currentUnifiedContainer.contains(answerSection)) {
+                currentUnifiedContainer.insertBefore(card, answerSection);
+            } else {
+                currentUnifiedContainer.appendChild(card);
+            }
+            scrollToBottom();
         }
 
         // 完成流式输出
@@ -1520,6 +1670,7 @@
         function createNewSession() {
             currentSessionId = generateSessionId();
             messages = [];
+            pendingToolApprovals.clear();
             messagesWrapper.innerHTML = '';
             showWelcomeScreen();
             
@@ -1538,6 +1689,7 @@
         function clearChat() {
             if (confirm('确定要清空当前对话吗？')) {
                 messages = [];
+                pendingToolApprovals.clear();
                 messagesWrapper.innerHTML = '';
                 showWelcomeScreen();
                 showNotification('已清空对话');
@@ -1612,6 +1764,7 @@
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const data = await res.json();
                 messages = [];
+                pendingToolApprovals.clear();
                 messagesWrapper.innerHTML = '';
                 const list = data.short_term || [];
                 if (list.length === 0) {
@@ -1626,6 +1779,7 @@
                 scrollToBottom();
             } catch (err) {
                 messages = [];
+                pendingToolApprovals.clear();
                 messagesWrapper.innerHTML = '';
                 showWelcomeScreen();
                 showNotification('加载会话失败：' + (err && err.message ? err.message : '未知错误'));

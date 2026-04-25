@@ -103,9 +103,12 @@ type MetricsConfig struct {
 
 // AgentRuntimeConfig Agent 运行时预算配置
 type AgentRuntimeConfig struct {
-	MaxSteps     int           `yaml:"max_steps"`
-	MaxToolCalls int           `yaml:"max_tool_calls"`
-	MaxDuration  time.Duration `yaml:"max_duration"`
+	MaxSteps           int           `yaml:"max_steps"`
+	MaxToolCalls       int           `yaml:"max_tool_calls"`
+	MaxDuration        time.Duration `yaml:"max_duration"`
+	ToolTimeout        time.Duration `yaml:"tool_timeout"`
+	ApprovalTimeout    time.Duration `yaml:"approval_timeout"`
+	TrustedHTTPDomains []string      `yaml:"trusted_http_domains"`
 }
 
 // Load 加载配置文件
@@ -265,6 +268,15 @@ func setDefaults(cfg *Config) {
 	if cfg.AgentRuntime.MaxDuration == 0 {
 		cfg.AgentRuntime.MaxDuration = 2 * time.Minute
 	}
+	if cfg.AgentRuntime.ToolTimeout == 0 {
+		cfg.AgentRuntime.ToolTimeout = 20 * time.Second
+	}
+	if cfg.AgentRuntime.ApprovalTimeout == 0 {
+		cfg.AgentRuntime.ApprovalTimeout = 2 * time.Minute
+	}
+	if cfg.AgentRuntime.TrustedHTTPDomains == nil {
+		cfg.AgentRuntime.TrustedHTTPDomains = []string{}
+	}
 }
 
 // validate 验证配置
@@ -329,6 +341,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.AgentRuntime.MaxDuration <= 0 {
 		return fmt.Errorf("agent_runtime max_duration must be positive")
+	}
+	if cfg.AgentRuntime.ToolTimeout <= 0 {
+		return fmt.Errorf("agent_runtime tool_timeout must be positive")
+	}
+	if cfg.AgentRuntime.ApprovalTimeout <= 0 {
+		return fmt.Errorf("agent_runtime approval_timeout must be positive")
 	}
 
 	return nil

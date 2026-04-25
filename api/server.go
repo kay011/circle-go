@@ -75,6 +75,8 @@ func NewServer(cfg *config.Config) *Server {
 		cfg.AgentRuntime.MaxToolCalls,
 		cfg.AgentRuntime.MaxDuration,
 	)
+	agentInstance.SetApprovalTimeout(cfg.AgentRuntime.ApprovalTimeout)
+	agentInstance.SetPolicyEngine(tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains))
 	agentInstance.SetMemoryManager(memoryManager)
 
 	// 设置 LLM 到记忆管理器
@@ -96,7 +98,7 @@ func NewServer(cfg *config.Config) *Server {
 	logger := logging.NewLogger(logging.INFO, "API")
 
 	// 初始化工具网关（M2：统一工具治理入口）
-	toolGateway := tools.NewToolGateway(toolManager, 20*time.Second, func(event tools.AuditEvent) {
+	toolGateway := tools.NewToolGateway(toolManager, cfg.AgentRuntime.ToolTimeout, func(event tools.AuditEvent) {
 		fields := map[string]interface{}{
 			"tool_name":   event.ToolName,
 			"status":      string(event.Status),

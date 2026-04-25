@@ -72,3 +72,6 @@ agent_runtime:
   max_steps: 5
   max_tool_calls: 20
   max_duration: 2m
+  tool_timeout: 20s
+  approval_timeout: 2m
+  trusted_http_domains: []

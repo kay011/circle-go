@@ -132,11 +132,25 @@ func TestBuildToolManagerFromConfig_SkillsOverride(t *testing.T) {
 	if err := os.MkdirAll(skillsDir, 0755); err != nil {
 		t.Fatalf("mkdir skills failed: %v", err)
 	}
+	investmentDir := filepath.Join(skillsDir, "investment")
+	if err := os.MkdirAll(investmentDir, 0755); err != nil {
+		t.Fatalf("mkdir investment skill failed: %v", err)
+	}
 	if err := os.WriteFile(manifestPath, []byte("tools:\n  - name: \"calculator\"\n    id: \"base.calc\"\n    intent_tags: [\"base\"]\n"), 0644); err != nil {
 		t.Fatalf("write base manifest failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(skillsDir, "skill.yaml"), []byte("tools:\n  - name: \"calculator\"\n    id: \"skill.calc\"\n    intent_tags: [\"skill\"]\n"), 0644); err != nil {
-		t.Fatalf("write skill manifest failed: %v", err)
+	skillMD := `---
+name: investment
+tools:
+  - name: calculator
+    id: skill.calc
+    intent_tags: ["skill"]
+---
+
+# Investment Skill
+`
+	if err := os.WriteFile(filepath.Join(investmentDir, "SKILL.md"), []byte(skillMD), 0644); err != nil {
+		t.Fatalf("write SKILL.md failed: %v", err)
 	}
 	cfg := &config.Config{
 		Tools: config.ToolsConfig{

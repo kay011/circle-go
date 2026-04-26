@@ -12,6 +12,7 @@
 - **策略引擎**：支持 allow / require_approval / deny 三态决策
 - **阻塞式人工审批**：高风险工具调用可挂起等待用户确认
 - **投资分析工具**：支持股票/基金名称或代码分析，输出量化评分与结论
+- **Hello World Skill**：支持最小技能链路验证（skill 命中、工具执行、前端状态提示）
 - **MCP 协议**：支持 Model Context Protocol，与其他系统集成
 - **用户认证**：支持用户注册和登录
 - **流式响应**：支持实时流式聊天体验
@@ -514,6 +515,27 @@ circle_go_build_info{version="1.0.0"} 1
 }
 ```
 
+### 6. Hello World 工具 (`hello_world`)
+
+**参数**：
+
+- `name`: 可选，问候对象（默认 `world`）
+
+**示例**：
+
+```json
+{
+  "name": "hello_world",
+  "arguments": {
+    "name": "Circle"
+  }
+}
+```
+
+**预期结果**：
+
+- `Hello, Circle! 欢迎使用 hello-world skill。`
+
 ## 工具治理与审批
 
 系统在工具执行前会经过三层治理：
@@ -541,6 +563,7 @@ circle_go_build_info{version="1.0.0"} 1
 
 > 说明：阻塞审批链路基于流式接口设计，建议使用 `/api/chat/stream` 体验完整审批流程。
 > 前端已内置审批交互卡片：收到工具调用后可直接在聊天窗口点击「批准执行 / 拒绝」，并自动携带一次性 token。
+> 当前前端也支持 Skill 事件提示：命中 skill 后会展示状态线「调用 Skill：<skill-id>」及可折叠 Skill 卡片。
 
 ### 分布式审批状态（Redis）
 
@@ -582,6 +605,7 @@ ai-agent/
 │   ├── mcp/          # MCP 客户端
 │   ├── memory/       # 记忆管理
 │   └── tools/        # 工具管理
+├── skills/           # Skill 目录（每个 Skill 一个子目录）
 ├── Dockerfile        # Docker 配置
 ├── docker-compose.yml # Docker Compose 配置
 ├── go.mod            # Go 模块文件
@@ -619,7 +643,45 @@ docker-compose up -d
 ### 添加自定义工具
 
 1. 实现 `tools.Tool` 接口
-2. 在 `api/server.go` 中注册工具
+2. 在 `internal/tools/registry.go` 的工厂表中挂载工具构造函数
+3. 在 `config/config.yaml` 的 `tools.enabled` 中启用工具
+
+### Skills 扩展（仅 SKILL.md 模式）
+
+系统支持 Claude/OpenClaw 风格的 skill 目录结构，且**不依赖** `_meta.json`：
+
+```text
+skills/
+  investment/
+    SKILL.md
+  hello-world/
+    SKILL.md
+```
+
+`SKILL.md` 通过 YAML front matter 描述工具元数据（`tools`），正文用于提示词注入：
+
+```markdown
+---
+name: investment
+description: 投资分析技能
+tools:
+  - name: investment_analyzer
+    id: skill.investment.analyzer
+    intent_tags: ["股票分析", "基金分析"]
+    policy:
+      timeout_seconds: 22
+      approval: never
+---
+
+# Investment Skill
+
+这里写该 skill 的行为约束与输出规范。
+```
+
+加载优先级：
+
+- 优先读取 `skills/<skill-id>/SKILL.md` front matter 作为工具元数据来源
+- 若存在旧版 `skill.yaml` / `skill.yml`，仅作为回退兼容
 
 ### 扩展 LLM 支持
 

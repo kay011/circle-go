@@ -387,6 +387,7 @@
         .mini-status-item.thinking .dot { background: #6366f1; }
         .mini-status-item.approval .dot { background: #f59e0b; }
         .mini-status-item.tool .dot { background: #10b981; }
+        .mini-status-item.skill .dot { background: #8b5cf6; }
         .mini-status-item.done .dot { background: #16a34a; }
         .mini-status-item.error .dot { background: #ef4444; }
 
@@ -472,6 +473,51 @@
             background: #fafbfc;
             overflow: hidden;
             margin: 4px 0;
+        }
+
+        .skill-call-collapsible {
+            border: 1px solid #ddd6fe;
+            border-radius: 12px;
+            background: #faf8ff;
+            overflow: hidden;
+            margin: 4px 0;
+        }
+
+        .skill-call-collapsible > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            font-size: 14px;
+            color: var(--text-primary);
+            user-select: none;
+        }
+
+        .skill-call-collapsible > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .skill-call-summary-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .skill-call-summary-left i {
+            color: #7c3aed;
+        }
+
+        .skill-call-body {
+            padding: 0 14px 12px;
+            border-top: 1px solid #ddd6fe;
+            background: white;
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.6;
         }
 
         .tool-call-collapsible > summary {
@@ -1019,6 +1065,10 @@
                         <div class="quick-action-icon">💻</div>
                         <div class="quick-action-text">代码生成</div>
                     </button>
+                    <button class="quick-action-btn" onclick="sendQuickMessage('请调用 hello_world 工具，name=Circle')">
+                        <div class="quick-action-icon">👋</div>
+                        <div class="quick-action-text">Hello Skill</div>
+                    </button>
                     <button class="quick-action-btn" onclick="sendQuickMessage('请务必调用 investment_analyzer 工具，asset_type=stock，分析 600519 是否具备投资价值，并输出PE和评分明细')">
                         <div class="quick-action-icon">📈</div>
                         <div class="quick-action-text">股票分析</div>
@@ -1509,6 +1559,39 @@
             addTimelineEvent('tool', '工具执行完成');
         }
 
+        function renderSkillCallCard(skillName) {
+            const safe = escapeHtml((skillName || '').trim() || 'unknown');
+            return `
+                <details class="skill-call-collapsible">
+                    <summary>
+                        <span class="skill-call-summary-left">
+                            <i class="fas fa-wand-magic-sparkles"></i>
+                            <span>Skill <strong>${safe}</strong></span>
+                        </span>
+                        <span class="tool-call-chevron"><i class="fas fa-chevron-down"></i></span>
+                    </summary>
+                    <div class="skill-call-body">
+                        当前轮次已命中该 Skill，后续将基于此 Skill 的约束与工具元数据继续执行。
+                    </div>
+                </details>
+            `;
+        }
+
+        function addSkillToUnified(skillName) {
+            ensureThinkingChip();
+            const name = (skillName || '').trim() || 'unknown';
+            addTimelineEvent('skill', `调用 Skill：${name}`);
+            const skillWrapper = document.createElement('div');
+            skillWrapper.className = 'message-bubble html-embed';
+            skillWrapper.innerHTML = renderSkillCallCard(name);
+            if (answerSection && currentUnifiedContainer.contains(answerSection)) {
+                currentUnifiedContainer.insertBefore(skillWrapper, answerSection);
+            } else {
+                currentUnifiedContainer.appendChild(skillWrapper);
+            }
+            scrollToBottom();
+        }
+
         // 获取或创建回答区域
         function getOrCreateAnswerSection() {
             if (!currentUnifiedContainer) {
@@ -1840,6 +1923,12 @@
                     const trimmed = data.trimStart();
                     
                     // 处理「正在使用工具」状态（后端 [STATUS] 前缀与纯文本两种）
+                    if (trimmed.startsWith('[SKILL]')) {
+                        closeTextSegment();
+                        const skillName = trimmed.replace(/^\[SKILL\]\s*/, '').trim();
+                        addSkillToUnified(skillName);
+                        return;
+                    }
                     if (trimmed.startsWith('[STATUS]')) {
                         closeTextSegment();
                         addThinkingToUnified(trimmed.replace(/^\[STATUS\]\s*/, '').trim());

@@ -15,6 +15,7 @@ type ToolFactory func(cfg *config.Config) Tool
 func BuildToolManagerFromConfig(cfg *config.Config) (*ToolManager, error) {
 	factories := map[string]ToolFactory{
 		"calculator":          func(_ *config.Config) Tool { return NewCalculatorTool() },
+		"hello_world":         func(_ *config.Config) Tool { return NewHelloWorldTool() },
 		"web_search":          func(c *config.Config) Tool { return NewWebSearchTool(c.Search.SearxInstances) },
 		"file_operation":      func(_ *config.Config) Tool { return NewFileTool() },
 		"http_client":         func(_ *config.Config) Tool { return NewHTTPClientTool() },

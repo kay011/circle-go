@@ -69,6 +69,7 @@ tools:
   manifest_path: "config/tools.manifests.yaml"
   enabled:
     - "calculator"
+    - "hello_world"
     - "web_search"
     - "file_operation"
     - "http_client"

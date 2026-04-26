@@ -55,6 +55,7 @@ type Server struct {
 	rateLimiter   *middleware.RateLimiter
 	startTime     time.Time // 服务器启动时间
 	approvalStore agent.ApprovalStore
+	skillPrompt   string
 }
 
 // NewServer 创建API服务器
@@ -79,7 +80,13 @@ func NewServer(cfg *config.Config) *Server {
 
 	// 初始化Agent
 	humanInTheLoop := true // 启用 human-in-the-loop
-	agentInstance := buildConfiguredAgent(cfg, llmClient, toolManager, memoryManager, humanInTheLoop, nil)
+	skillPrompt := ""
+	if cfg.Skills.Enabled {
+		if prompt, err := tools.LoadSkillPromptTextFromDir(cfg.Skills.Path); err == nil {
+			skillPrompt = prompt
+		}
+	}
+	agentInstance := buildConfiguredAgent(cfg, llmClient, toolManager, memoryManager, humanInTheLoop, nil, skillPrompt)
 	var approvalStore agent.ApprovalStore
 
 	if cfg.Redis.Enabled {
@@ -144,10 +151,11 @@ func NewServer(cfg *config.Config) *Server {
 		rateLimiter:   rateLimiter,
 		startTime:     time.Now(),
 		approvalStore: approvalStore,
+		skillPrompt:   skillPrompt,
 	}
 }
 
-func buildConfiguredAgent(cfg *config.Config, llmClient llm.LLM, toolManager *tools.ToolManager, memoryManager *memory.MemoryManager, humanInTheLoop bool, approvalStore agent.ApprovalStore) *agent.Agent {
+func buildConfiguredAgent(cfg *config.Config, llmClient llm.LLM, toolManager *tools.ToolManager, memoryManager *memory.MemoryManager, humanInTheLoop bool, approvalStore agent.ApprovalStore, skillPrompt string) *agent.Agent {
 	agentInstance := agent.NewAgent(llmClient, toolManager, cfg.AgentRuntime.MaxSteps, humanInTheLoop)
 	agentInstance.SetRuntimeLimits(
 		cfg.AgentRuntime.MaxSteps,
@@ -182,6 +190,7 @@ func buildConfiguredAgent(cfg *config.Config, llmClient llm.LLM, toolManager *to
 		SummarizeTimeout:     cfg.AgentRouting.SummarizeTimeout,
 		SummarizeOnToolError: cfg.AgentRouting.SummarizeOnToolError,
 	})
+	agentInstance.SetSystemPromptExtension(skillPrompt)
 	if approvalStore != nil {
 		agentInstance.SetApprovalStore(approvalStore)
 	}
@@ -242,7 +251,7 @@ func (s *Server) resolveLLMForRequest(override *llmRequestOverride) (llm.LLM, *a
 		s.config.LLM.MaxTokens,
 		float32(s.config.LLM.Temperature),
 	)
-	customAgent := buildConfiguredAgent(s.config, customLLM, s.toolManager, s.memoryManager, true, s.approvalStore)
+	customAgent := buildConfiguredAgent(s.config, customLLM, s.toolManager, s.memoryManager, true, s.approvalStore, s.skillPrompt)
 	return customLLM, customAgent, provider + ":" + model, nil
 }
 

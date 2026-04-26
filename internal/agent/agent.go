@@ -251,6 +251,7 @@ type Agent struct {
 	toolRouter          *ToolRouter
 	responsePolicy      *ResponsePolicyEngine
 	legacyRoutingPath   bool
+	systemPrompt        string
 }
 
 type pendingToolCall struct {
@@ -316,6 +317,7 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 			SummarizeTimeout:     12 * time.Second,
 			SummarizeOnToolError: false,
 		}),
+		systemPrompt: SystemPrompt,
 	}
 }
 
@@ -396,6 +398,16 @@ func (a *Agent) SetPolicyEngine(engine tools.PolicyEngine) {
 	if engine != nil {
 		a.policyEngine = engine
 	}
+}
+
+// SetSystemPromptExtension 在基础系统提示词后追加 skill 指令片段。
+func (a *Agent) SetSystemPromptExtension(extension string) {
+	ext := strings.TrimSpace(extension)
+	if ext == "" {
+		a.systemPrompt = SystemPrompt
+		return
+	}
+	a.systemPrompt = SystemPrompt + "\n\n# Skills 指令\n" + ext
 }
 
 // SetApprovalTimeout 设置工具审批等待超时（<=0 忽略）。
@@ -484,6 +496,33 @@ func randomToken() string {
 		return fmt.Sprintf("fallback_%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
+}
+
+func (a *Agent) resolveSkillNameByTool(toolName string) string {
+	if a == nil || a.toolManager == nil {
+		return ""
+	}
+	tool := a.toolManager.Get(toolName)
+	if tool == nil {
+		return ""
+	}
+	provider, ok := tool.(tools.ToolMetadataProvider)
+	if !ok {
+		return ""
+	}
+	md := provider.Metadata()
+	owner := strings.TrimSpace(md.Owner)
+	if strings.HasPrefix(owner, "skills/") {
+		return strings.TrimSpace(strings.TrimPrefix(owner, "skills/"))
+	}
+	id := strings.TrimSpace(md.ID)
+	if strings.HasPrefix(id, "skill.") {
+		parts := strings.Split(id, ".")
+		if len(parts) >= 2 && strings.TrimSpace(parts[1]) != "" {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
 }
 
 func (a *Agent) waitForToolApproval(ctx context.Context, sessionID string, req ToolCallRequest) (bool, error) {
@@ -707,7 +746,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 	messages := []llm.Message{
 		{
 			Role:    "system",
-			Content: SystemPrompt,
+			Content: a.systemPrompt,
 		},
 	}
 
@@ -1027,7 +1066,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 	messages := []llm.Message{
 		{
 			Role:    "system",
-			Content: SystemPrompt,
+			Content: a.systemPrompt,
 		},
 	}
 
@@ -1298,6 +1337,13 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 						return "", cerr
 					}
 					return msg, nil
+				}
+			}
+
+			// 通知前端：当前命中的 skill（若有）
+			if skillName := a.resolveSkillNameByTool(functionCall.Name); skillName != "" {
+				if cerr := callback(fmt.Sprintf("[SKILL] %s", skillName)); cerr != nil {
+					return "", cerr
 				}
 			}
 

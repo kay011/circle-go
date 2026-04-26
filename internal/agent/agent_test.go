@@ -44,10 +44,51 @@ func (t *noopTool) Run(ctx context.Context, args map[string]interface{}) (string
 	return "ok", nil
 }
 
+type investmentSpyTool struct {
+	called bool
+	args   map[string]interface{}
+}
+
+func (t *investmentSpyTool) Name() string { return "investment_analyzer" }
+func (t *investmentSpyTool) Description() string {
+	return "investment analyzer spy"
+}
+func (t *investmentSpyTool) Parameters() map[string]tools.Property {
+	return map[string]tools.Property{
+		"name_or_code": {Type: "string", Description: "name or code"},
+		"asset_type":   {Type: "string", Description: "asset type"},
+	}
+}
+func (t *investmentSpyTool) Required() []string { return []string{"name_or_code"} }
+func (t *investmentSpyTool) Run(ctx context.Context, args map[string]interface{}) (string, error) {
+	t.called = true
+	t.args = args
+	return "investment-ok", nil
+}
+
 func newTestAgent(m llm.LLM, maxSteps int) *Agent {
 	tm := tools.NewToolManager()
 	tm.Register(&noopTool{})
-	return NewAgent(m, tm, maxSteps, false)
+	a := NewAgent(m, tm, maxSteps, false)
+	a.SetResponsePolicyConfig(ResponsePolicyConfig{
+		Mode:             ResponseModeSummarize,
+		SummarizeTimeout: 2 * time.Second,
+	})
+	return a
+}
+
+func newTestAgentWithTools(m llm.LLM, maxSteps int, extra ...tools.Tool) *Agent {
+	tm := tools.NewToolManager()
+	tm.Register(&noopTool{})
+	for _, tool := range extra {
+		tm.Register(tool)
+	}
+	a := NewAgent(m, tm, maxSteps, false)
+	a.SetResponsePolicyConfig(ResponsePolicyConfig{
+		Mode:             ResponseModeSummarize,
+		SummarizeTimeout: 2 * time.Second,
+	})
+	return a
 }
 
 type mockPolicyEngine struct {
@@ -169,4 +210,48 @@ func TestRunStream_HumanApprovalRejected(t *testing.T) {
 	if !strings.Contains(final, "工具调用已取消") {
 		t.Fatalf("expected cancel message, got %s", final)
 	}
+}
+
+func TestRun_RewritesWebSearchToInvestmentAnalyzer(t *testing.T) {
+	callCount := 0
+	m := &mockLLM{
+		function: func(ctx context.Context, messages []llm.Message, tools []llm.Tool) (string, *llm.FunctionCall, error) {
+			callCount++
+			if callCount == 1 {
+				return "need tool", &llm.FunctionCall{
+					Name: "web_search",
+					Arguments: map[string]interface{}{
+						"query": "贵州茅台",
+					},
+				}, nil
+			}
+			return "final answer", nil, nil
+		},
+	}
+
+	spy := &investmentSpyTool{}
+	a := newTestAgentWithTools(m, 5, spy)
+	a.SetRuntimeLimits(5, 5, 30*time.Second)
+
+	resp, err := a.Run(context.Background(), "s1", "帮我分析下 贵州茅台这只股票")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if resp != "final answer" {
+		t.Fatalf("unexpected response: %s", resp)
+	}
+	if !spy.called {
+		t.Fatalf("expected investment_analyzer to be called")
+	}
+	if got := strings.TrimSpace(asString(spy.args["name_or_code"])); got != "帮我分析下 贵州茅台这只股票" {
+		t.Fatalf("unexpected name_or_code, got %q", got)
+	}
+}
+
+func asString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }

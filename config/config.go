@@ -21,6 +21,7 @@ type Config struct {
 	Logging      LoggingConfig      `yaml:"logging"`
 	Metrics      MetricsConfig      `yaml:"metrics"`
 	AgentRuntime AgentRuntimeConfig `yaml:"agent_runtime"`
+	AgentRouting AgentRoutingConfig `yaml:"agent_routing"`
 }
 
 // ServerConfig 服务器配置
@@ -119,6 +120,22 @@ type AgentRuntimeConfig struct {
 	ToolTimeout        time.Duration `yaml:"tool_timeout"`
 	ApprovalTimeout    time.Duration `yaml:"approval_timeout"`
 	TrustedHTTPDomains []string      `yaml:"trusted_http_domains"`
+}
+
+type AgentRoutingConfig struct {
+	Enabled              bool          `yaml:"enabled"`
+	TopK                 int           `yaml:"top_k"`
+	MinScore             int           `yaml:"min_score"`
+	FallbackToAll        bool          `yaml:"fallback_to_all"`
+	RouterEnabled        bool          `yaml:"router_enabled"`
+	RouterMinConfidence  float64       `yaml:"router_min_confidence"`
+	RouterTimeout        time.Duration `yaml:"router_timeout"`
+	ErrorRerouteEnabled  bool          `yaml:"error_reroute_enabled"`
+	ErrorRerouteTimeout  time.Duration `yaml:"error_reroute_timeout"`
+	ResponseMode         string        `yaml:"response_mode"` // direct|summarize|hybrid
+	SummarizeTimeout     time.Duration `yaml:"summarize_timeout"`
+	SummarizeOnToolError bool          `yaml:"summarize_on_tool_error"`
+	FeatureFlagLegacy    bool          `yaml:"feature_flag_legacy"`
 }
 
 // Load 加载配置文件
@@ -295,6 +312,34 @@ func setDefaults(cfg *Config) {
 	if cfg.AgentRuntime.TrustedHTTPDomains == nil {
 		cfg.AgentRuntime.TrustedHTTPDomains = []string{}
 	}
+
+	if cfg.AgentRouting.TopK == 0 && cfg.AgentRouting.MinScore == 0 && cfg.AgentRouting.ResponseMode == "" && cfg.AgentRouting.RouterTimeout == 0 {
+		cfg.AgentRouting.Enabled = true
+		cfg.AgentRouting.FallbackToAll = true
+		cfg.AgentRouting.RouterEnabled = true
+		cfg.AgentRouting.ErrorRerouteEnabled = true
+	}
+	if cfg.AgentRouting.TopK <= 0 {
+		cfg.AgentRouting.TopK = 4
+	}
+	if cfg.AgentRouting.MinScore <= 0 {
+		cfg.AgentRouting.MinScore = 1
+	}
+	if cfg.AgentRouting.RouterMinConfidence <= 0 {
+		cfg.AgentRouting.RouterMinConfidence = 0.68
+	}
+	if cfg.AgentRouting.RouterTimeout <= 0 {
+		cfg.AgentRouting.RouterTimeout = 8 * time.Second
+	}
+	if cfg.AgentRouting.ErrorRerouteTimeout <= 0 {
+		cfg.AgentRouting.ErrorRerouteTimeout = 6 * time.Second
+	}
+	if cfg.AgentRouting.ResponseMode == "" {
+		cfg.AgentRouting.ResponseMode = "hybrid"
+	}
+	if cfg.AgentRouting.SummarizeTimeout <= 0 {
+		cfg.AgentRouting.SummarizeTimeout = 12 * time.Second
+	}
 }
 
 // validate 验证配置
@@ -369,6 +414,17 @@ func validate(cfg *Config) error {
 	}
 	if cfg.AgentRuntime.ApprovalTimeout <= 0 {
 		return fmt.Errorf("agent_runtime approval_timeout must be positive")
+	}
+	if cfg.AgentRouting.TopK <= 0 {
+		return fmt.Errorf("agent_routing top_k must be positive")
+	}
+	if cfg.AgentRouting.RouterMinConfidence < 0 || cfg.AgentRouting.RouterMinConfidence > 1 {
+		return fmt.Errorf("agent_routing router_min_confidence must be between 0 and 1")
+	}
+	switch cfg.AgentRouting.ResponseMode {
+	case "", "direct", "summarize", "hybrid":
+	default:
+		return fmt.Errorf("agent_routing response_mode must be one of direct|summarize|hybrid")
 	}
 
 	return nil

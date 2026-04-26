@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -246,12 +247,21 @@ type Agent struct {
 	pendingMu           sync.Mutex
 	approvalTimeout     time.Duration
 	approvalStore       ApprovalStore
+	toolRetriever       *ToolRetriever
+	toolRouter          *ToolRouter
+	responsePolicy      *ResponsePolicyEngine
+	legacyRoutingPath   bool
 }
 
 type pendingToolCall struct {
 	sessionID string
 	token     string
 	response  chan ToolCallResponse
+}
+
+type toolSearchDoc struct {
+	Tool     llm.Tool
+	Keywords []string
 }
 
 // NewAgent 创建Agent实例
@@ -288,6 +298,24 @@ func NewAgent(llm llm.LLM, toolManager *tools.ToolManager, maxSteps int, humanIn
 		pendingToolCalls:    make(map[string]pendingToolCall),
 		approvalTimeout:     2 * time.Minute,
 		approvalStore:       &noopApprovalStore{},
+		toolRetriever: NewToolRetriever(llmTools, ToolRetrievalConfig{
+			Enabled:       true,
+			TopK:          4,
+			MinScore:      1,
+			FallbackToAll: true,
+		}),
+		toolRouter: NewToolRouter(llm, ToolRouterConfig{
+			Enabled:             true,
+			MinConfidence:       0.68,
+			Timeout:             8 * time.Second,
+			ErrorRerouteEnabled: true,
+			ErrorRerouteTimeout: 6 * time.Second,
+		}),
+		responsePolicy: NewResponsePolicyEngine(llm, ResponsePolicyConfig{
+			Mode:                 ResponseModeHybrid,
+			SummarizeTimeout:     12 * time.Second,
+			SummarizeOnToolError: false,
+		}),
 	}
 }
 
@@ -377,6 +405,29 @@ func (a *Agent) SetApprovalStore(store ApprovalStore) {
 	if store != nil {
 		a.approvalStore = store
 	}
+}
+
+func (a *Agent) SetToolRetrievalConfig(cfg ToolRetrievalConfig) {
+	a.toolRetriever = NewToolRetriever(a.llmTools, cfg)
+}
+
+func (a *Agent) SetToolRouterConfig(cfg ToolRouterConfig) {
+	a.toolRouter = NewToolRouter(a.llm, cfg)
+}
+
+func (a *Agent) SetResponsePolicyConfig(cfg ResponsePolicyConfig) {
+	a.responsePolicy = NewResponsePolicyEngine(a.llm, cfg)
+}
+
+func (a *Agent) SetLegacyRoutingPath(enabled bool) {
+	a.legacyRoutingPath = enabled
+}
+
+func (a *Agent) selectLLMToolsForQuery(userInput string) []llm.Tool {
+	if a.legacyRoutingPath || a.toolRetriever == nil {
+		return a.llmTools
+	}
+	return a.toolRetriever.Select(userInput)
 }
 
 // ResolveToolCallApproval 处理外部的工具审批结果。
@@ -566,6 +617,67 @@ func isTransientToolError(err error) bool {
 		strings.Contains(msg, "临时不可用")
 }
 
+var stockCodePattern = regexp.MustCompile(`\b\d{6}\b`)
+
+func isInvestmentIntent(input string) bool {
+	text := strings.ToLower(strings.TrimSpace(input))
+	if text == "" {
+		return false
+	}
+	keywords := []string{
+		"股票", "基金", "茅台", "a股", "港股", "美股", "估值", "pe", "市盈率", "投资", "分析",
+		"stock", "fund",
+	}
+	for _, k := range keywords {
+		if strings.Contains(text, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return stockCodePattern.MatchString(text)
+}
+
+func buildInvestmentAnalyzerArgs(input string) map[string]interface{} {
+	query := strings.TrimSpace(input)
+	if code := stockCodePattern.FindString(query); code != "" {
+		query = code
+	}
+	return map[string]interface{}{
+		"name_or_code": query,
+		"asset_type":   "auto",
+	}
+}
+
+func maybeRewriteToInvestmentTool(functionCall *llm.FunctionCall, userInput string) {
+	if functionCall == nil {
+		return
+	}
+	if functionCall.Name != "web_search" {
+		return
+	}
+	if !isInvestmentIntent(userInput) {
+		return
+	}
+	functionCall.Name = "investment_analyzer"
+	functionCall.Arguments = buildInvestmentAnalyzerArgs(userInput)
+}
+
+func toolExists(toolsList []llm.Tool, name string) bool {
+	for _, t := range toolsList {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func mustJSON(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // Run 运行Agent
 func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, error) {
 	// 重置工具调用历史
@@ -648,6 +760,10 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			return "处理超时，请尝试简化问题或提供更多信息。", nil
 		}
 
+		activeTools := a.selectLLMToolsForQuery(userInput)
+		logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "retrieve"})
+		logging.ObserveMetricWithLabels("tool_candidates_count", map[string]string{"stage": "retrieve"}, float64(len(activeTools)))
+
 		runCtx.IncStep()
 		runCtx.Enter(agentruntime.StateExecute)
 		logger.Info("执行ReAct步骤", map[string]interface{}{
@@ -660,7 +776,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 		// 发送请求
 		logger.Info("调用LLM", map[string]interface{}{
 			"message_count": len(messages),
-			"tool_count":    len(a.llmTools),
+			"tool_count":    len(activeTools),
 			"session_id":    sessionID,
 		})
 
@@ -673,7 +789,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			})
 		}
 
-		response, functionCall, err := a.llm.FunctionCall(ctx, messages, a.llmTools)
+		response, functionCall, err := a.llm.FunctionCall(ctx, messages, activeTools)
 		if err != nil {
 			// 处理 LLM 调用错误，返回友好的错误信息
 			logging.IncrMetric("agent_calls_errors")
@@ -688,6 +804,12 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 		}
 
 		if functionCall != nil {
+			maybeRewriteToInvestmentTool(functionCall, userInput)
+			if a.toolRouter != nil {
+				logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "route"})
+				functionCall = a.toolRouter.Route(ctx, userInput, functionCall, activeTools)
+			}
+
 			// 检查工具调用是否重复
 			currentToolCall := ToolCall{
 				Name:      functionCall.Name,
@@ -780,6 +902,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 			toolProcessingTime := time.Since(toolStartTime).Milliseconds()
 			if err != nil {
 				logging.IncrMetricWithLabels("tool_calls_errors", map[string]string{"tool_name": functionCall.Name})
+				logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "execute_error"})
 				logger.Error("工具执行失败", map[string]interface{}{
 					"tool_name":       functionCall.Name,
 					"error":           err.Error(),
@@ -787,11 +910,22 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 					"trace_id":        runCtx.TraceID,
 					"processing_time": toolProcessingTime,
 				})
+				if a.toolRouter != nil {
+					if rerouted := a.toolRouter.RerouteAfterError(ctx, userInput, functionCall, err, activeTools); rerouted != nil {
+						logging.IncrMetricWithLabels("tool_reroute_total", map[string]string{
+							"from": functionCall.Name,
+							"to":   rerouted.Name,
+						})
+						functionCall = rerouted
+						continue
+					}
+				}
 				if isTransientToolError(err) {
 					return fmt.Sprintf("工具 %s 的下游数据源暂时不可用（%v），请稍后重试。", functionCall.Name, err), nil
 				}
 				toolResult = fmt.Sprintf("Error: %v", err)
 			} else {
+				logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "execute_success"})
 				logger.Info("工具执行成功", map[string]interface{}{
 					"tool_name":       functionCall.Name,
 					"result_length":   len(toolResult),
@@ -810,6 +944,21 @@ func (a *Agent) Run(ctx context.Context, sessionID, userInput string) (string, e
 				Role:    "tool",
 				Content: toolResult,
 			})
+
+			if a.responsePolicy != nil {
+				final, summarized := a.responsePolicy.BuildFinal(ctx, userInput, ToolExecutionOutcome{
+					ToolName:   functionCall.Name,
+					ToolArgs:   functionCall.Arguments,
+					ToolResult: toolResult,
+					ToolErr:    err,
+				})
+				logging.IncrMetricWithLabels("tool_response_path_total", map[string]string{
+					"path": map[bool]string{true: "summarized", false: "direct"}[summarized],
+				})
+				if final != "" {
+					return final, nil
+				}
+			}
 
 			// 将重要信息添加到长期记忆
 			if a.memoryManager != nil {
@@ -949,6 +1098,10 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			return msg, nil
 		}
 
+		activeTools := a.selectLLMToolsForQuery(userInput)
+		logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "retrieve"})
+		logging.ObserveMetricWithLabels("tool_candidates_count", map[string]string{"stage": "retrieve"}, float64(len(activeTools)))
+
 		runCtx.IncStep()
 		runCtx.Enter(agentruntime.StateExecute)
 		stepStartTime := time.Now()
@@ -962,7 +1115,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 		llmStartTime := time.Now()
 		logger.Info("调用LLM", map[string]interface{}{
 			"message_count": len(messages),
-			"tool_count":    len(a.llmTools),
+			"tool_count":    len(activeTools),
 		})
 
 		// 打印发送给 LLM 的消息(调试用)
@@ -973,7 +1126,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			})
 		}
 
-		response, functionCall, err := a.llm.FunctionCall(ctx, messages, a.llmTools)
+		response, functionCall, err := a.llm.FunctionCall(ctx, messages, activeTools)
 		llmDuration := time.Since(llmStartTime)
 		if err != nil {
 			// 处理 LLM 调用错误，返回友好的错误信息
@@ -1008,6 +1161,12 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 		}
 
 		if functionCall != nil {
+			maybeRewriteToInvestmentTool(functionCall, userInput)
+			if a.toolRouter != nil {
+				logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "route"})
+				functionCall = a.toolRouter.Route(ctx, userInput, functionCall, activeTools)
+			}
+
 			// 检查工具调用是否重复
 			currentToolCall := ToolCall{
 				Name:      functionCall.Name,
@@ -1173,12 +1332,23 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 			toolResult, err := a.toolGateway.Execute(ctx, functionCall.Name, functionCall.Arguments)
 			toolDuration := time.Since(toolStartTime)
 			if err != nil {
+				logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "execute_error"})
 				logger.Error("工具执行失败", map[string]interface{}{
 					"tool_name": functionCall.Name,
 					"error":     err.Error(),
 					"duration":  toolDuration.Milliseconds(),
 					"trace_id":  runCtx.TraceID,
 				})
+				if a.toolRouter != nil {
+					if rerouted := a.toolRouter.RerouteAfterError(ctx, userInput, functionCall, err, activeTools); rerouted != nil {
+						logging.IncrMetricWithLabels("tool_reroute_total", map[string]string{
+							"from": functionCall.Name,
+							"to":   rerouted.Name,
+						})
+						functionCall = rerouted
+						continue
+					}
+				}
 				if isTransientToolError(err) {
 					msg := fmt.Sprintf("工具 %s 的下游数据源暂时不可用（%v），请稍后重试。", functionCall.Name, err)
 					if cerr := callback(msg); cerr != nil {
@@ -1188,6 +1358,7 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				}
 				toolResult = fmt.Sprintf("Error: %v", err)
 			} else {
+				logging.IncrMetricWithLabels("tool_stage_total", map[string]string{"stage": "execute_success"})
 				logger.Info("工具执行成功", map[string]interface{}{
 					"tool_name":     functionCall.Name,
 					"result_length": len(toolResult),
@@ -1211,6 +1382,24 @@ func (a *Agent) RunStream(ctx context.Context, sessionID, userInput string, call
 				Role:    "tool",
 				Content: toolResult,
 			})
+
+			if a.responsePolicy != nil {
+				final, summarized := a.responsePolicy.BuildFinal(ctx, userInput, ToolExecutionOutcome{
+					ToolName:   functionCall.Name,
+					ToolArgs:   functionCall.Arguments,
+					ToolResult: toolResult,
+					ToolErr:    err,
+				})
+				logging.IncrMetricWithLabels("tool_response_path_total", map[string]string{
+					"path": map[bool]string{true: "summarized", false: "direct"}[summarized],
+				})
+				if final != "" {
+					if cerr := callback(final); cerr != nil {
+						return "", cerr
+					}
+					return final, nil
+				}
+			}
 
 			// 将重要信息添加到长期记忆
 			if a.memoryManager != nil {

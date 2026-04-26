@@ -83,3 +83,19 @@ agent_runtime:
   tool_timeout: 20s
   approval_timeout: 2m
   trusted_http_domains: []
+
+# Agent 路由与回复策略
+agent_routing:
+  enabled: true
+  top_k: 4
+  min_score: 1
+  fallback_to_all: true
+  router_enabled: true
+  router_min_confidence: 0.68
+  router_timeout: 8s
+  error_reroute_enabled: true
+  error_reroute_timeout: 6s
+  response_mode: "hybrid"          # direct|summarize|hybrid
+  summarize_timeout: 12s
+  summarize_on_tool_error: false
+  feature_flag_legacy: false

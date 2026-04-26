@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 const eastmoneySuggestToken = "D43BF722C8E33BDC906FB84D85E326E8"
@@ -438,7 +442,10 @@ func (t *investmentAnalyzerTool) fetchStockQuoteFromTencent(ctx context.Context,
 	if err != nil {
 		return stockQuoteData{}, err
 	}
-	raw := string(rawBytes)
+	raw, err := decodeGBK(rawBytes)
+	if err != nil {
+		raw = string(rawBytes)
+	}
 	start := strings.Index(raw, "\"")
 	end := strings.LastIndex(raw, "\"")
 	if start < 0 || end <= start {
@@ -451,7 +458,16 @@ func (t *investmentAnalyzerTool) fetchStockQuoteFromTencent(ctx context.Context,
 	name := strings.TrimSpace(parts[1])
 	latest := parseNumeric(parts[3])
 	changePct := parseNumeric(parts[32])
-	amplitude := parseNumeric(parts[37])
+	prevClose := parseNumeric(parts[4])
+	high := parseNumeric(parts[33])
+	low := parseNumeric(parts[34])
+	amplitude := 0.0
+	if prevClose > 0 && high > 0 && low > 0 && high >= low {
+		amplitude = (high - low) / prevClose * 100
+	}
+	if amplitude < 0 || amplitude > 30 {
+		amplitude = 0
+	}
 	pe := parseNumeric(parts[39])
 	return stockQuoteData{
 		Code:        strings.TrimSpace(parts[2]),
@@ -462,6 +478,15 @@ func (t *investmentAnalyzerTool) fetchStockQuoteFromTencent(ctx context.Context,
 		PETTM:       pe,
 		PEAvailable: pe > 0 && pe < 300,
 	}, nil
+}
+
+func decodeGBK(data []byte) (string, error) {
+	reader := transform.NewReader(bytes.NewReader(data), simplifiedchinese.GBK.NewDecoder())
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
 }
 
 type component struct {

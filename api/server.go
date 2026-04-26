@@ -83,6 +83,25 @@ func NewServer(cfg *config.Config) *Server {
 	agentInstance.SetApprovalTimeout(cfg.AgentRuntime.ApprovalTimeout)
 	agentInstance.SetPolicyEngine(tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains))
 	agentInstance.SetMemoryManager(memoryManager)
+	agentInstance.SetLegacyRoutingPath(cfg.AgentRouting.FeatureFlagLegacy)
+	agentInstance.SetToolRetrievalConfig(agent.ToolRetrievalConfig{
+		Enabled:       cfg.AgentRouting.Enabled,
+		TopK:          cfg.AgentRouting.TopK,
+		MinScore:      cfg.AgentRouting.MinScore,
+		FallbackToAll: cfg.AgentRouting.FallbackToAll,
+	})
+	agentInstance.SetToolRouterConfig(agent.ToolRouterConfig{
+		Enabled:             cfg.AgentRouting.RouterEnabled,
+		MinConfidence:       cfg.AgentRouting.RouterMinConfidence,
+		Timeout:             cfg.AgentRouting.RouterTimeout,
+		ErrorRerouteEnabled: cfg.AgentRouting.ErrorRerouteEnabled,
+		ErrorRerouteTimeout: cfg.AgentRouting.ErrorRerouteTimeout,
+	})
+	agentInstance.SetResponsePolicyConfig(agent.ResponsePolicyConfig{
+		Mode:                 agent.ResponseMode(cfg.AgentRouting.ResponseMode),
+		SummarizeTimeout:     cfg.AgentRouting.SummarizeTimeout,
+		SummarizeOnToolError: cfg.AgentRouting.SummarizeOnToolError,
+	})
 
 	if cfg.Redis.Enabled {
 		rdb := redis.NewClient(&redis.Options{

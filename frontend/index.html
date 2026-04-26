@@ -759,6 +759,41 @@
             position: relative;
         }
 
+        .model-picker {
+            max-width: 138px;
+            height: 28px;
+            border: 1px solid #e8ebf3;
+            border-radius: 10px;
+            background: #f8fafd;
+            color: #64748b;
+            font-size: 11px;
+            font-weight: 400;
+            padding: 0 22px 0 8px;
+            appearance: none;
+            -webkit-appearance: none;
+            cursor: pointer;
+            background-image: linear-gradient(45deg, transparent 50%, #64748b 50%), linear-gradient(135deg, #64748b 50%, transparent 50%);
+            background-position: calc(100% - 11px) 11px, calc(100% - 7px) 11px;
+            background-size: 4px 4px, 4px 4px;
+            background-repeat: no-repeat;
+            flex-shrink: 0;
+            transition: all 0.2s ease;
+        }
+
+        .model-picker:hover {
+            border-color: #d8deea;
+            background: #f6f8fc;
+            color: #475569;
+        }
+
+        .model-picker:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            background: #ffffff;
+            color: #334155;
+            box-shadow: 0 0 0 2px rgba(91, 143, 249, 0.08);
+        }
+
         .input-box {
             display: flex;
             align-items: flex-end;
@@ -999,6 +1034,9 @@
         <div class="input-area">
             <div class="input-wrapper">
                 <div class="input-box">
+                    <select id="llmModelPicker" class="model-picker" title="切换模型">
+                        <option value="default::">模型加载中...</option>
+                    </select>
                     <textarea 
                         id="messageInput" 
                         class="message-input" 
@@ -1025,7 +1063,71 @@
         const messagesWrapper = document.getElementById('messagesWrapper');
         const welcomeScreen = document.getElementById('welcomeScreen');
         const messageInput = document.getElementById('messageInput');
+        const llmModelPicker = document.getElementById('llmModelPicker');
         const sendButton = document.getElementById('sendButton');
+        let llmCatalog = { default_provider: 'default', providers: [] };
+
+        function normalizeProviderLabel(name) {
+            if (name === 'qwen') return 'Qwen';
+            if (name === 'deepseek') return 'DeepSeek';
+            if (name === 'default') return '默认';
+            return name;
+        }
+
+        function rebuildModelPicker() {
+            llmModelPicker.innerHTML = '';
+            let selectedValue = '';
+
+            (llmCatalog.providers || []).forEach(p => {
+                const providerName = p.name || 'default';
+                const providerLabel = normalizeProviderLabel(providerName);
+                const models = (p.models && p.models.length > 0) ? p.models : [p.default_model];
+                models.filter(Boolean).forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = `${providerName}::${m}`;
+                    opt.textContent = m;
+                    llmModelPicker.appendChild(opt);
+                    if (!selectedValue && providerName === llmCatalog.default_provider && m === p.default_model) {
+                        selectedValue = opt.value;
+                    }
+                });
+            });
+
+            if (llmModelPicker.options.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = 'default::';
+                opt.textContent = '默认模型';
+                llmModelPicker.appendChild(opt);
+            }
+            llmModelPicker.value = selectedValue || llmModelPicker.options[0].value;
+        }
+
+        async function loadLLMModels() {
+            try {
+                const resp = await fetch('/api/llm/models');
+                if (!resp.ok) throw new Error('load failed');
+                const data = await resp.json();
+                llmCatalog = data || llmCatalog;
+                rebuildModelPicker();
+            } catch (_) {
+                llmModelPicker.innerHTML = '<option value="default::">默认模型</option>';
+            }
+        }
+
+        function buildLLMPayload() {
+            const selected = (llmModelPicker?.value || '').trim();
+            if (!selected) {
+                return undefined;
+            }
+            const [providerRaw, modelRaw] = selected.split('::');
+            const provider = (providerRaw || 'default').trim();
+            const model = (modelRaw || '').trim();
+            if (model === '') return undefined;
+            return {
+                provider,
+                model
+            };
+        }
 
         // 生成会话ID
         function generateSessionId() {
@@ -1045,6 +1147,7 @@
                 sendMessage();
             }
         }
+        loadLLMModels();
 
         let scrollScheduled = false;
         function scrollToBottom() {
@@ -1635,7 +1738,8 @@
                     },
                     body: JSON.stringify({
                         session_id: currentSessionId,
-                        message: message
+                        message: message,
+                        llm: buildLLMPayload()
                     })
                 });
 

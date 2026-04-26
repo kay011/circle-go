@@ -22,6 +22,12 @@ import (
 )
 
 const appVersion = "1.0.0"
+const deepseekOpenAIBaseURL = "https://api.deepseek.com/v1"
+
+type llmRequestOverride struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
 
 // writeSSEData 按 SSE 规范写入文本：拆成多行 data:，由浏览器拼成完整 payload，避免单行 data 内含换行导致前端只收到首行。
 func writeSSEData(w http.ResponseWriter, text string) {
@@ -48,6 +54,7 @@ type Server struct {
 	server        *http.Server
 	rateLimiter   *middleware.RateLimiter
 	startTime     time.Time // 服务器启动时间
+	approvalStore agent.ApprovalStore
 }
 
 // NewServer 创建API服务器
@@ -74,34 +81,8 @@ func NewServer(cfg *config.Config) *Server {
 
 	// 初始化Agent
 	humanInTheLoop := true // 启用 human-in-the-loop
-	agentInstance := agent.NewAgent(llmClient, toolManager, cfg.AgentRuntime.MaxSteps, humanInTheLoop)
-	agentInstance.SetRuntimeLimits(
-		cfg.AgentRuntime.MaxSteps,
-		cfg.AgentRuntime.MaxToolCalls,
-		cfg.AgentRuntime.MaxDuration,
-	)
-	agentInstance.SetApprovalTimeout(cfg.AgentRuntime.ApprovalTimeout)
-	agentInstance.SetPolicyEngine(tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains))
-	agentInstance.SetMemoryManager(memoryManager)
-	agentInstance.SetLegacyRoutingPath(cfg.AgentRouting.FeatureFlagLegacy)
-	agentInstance.SetToolRetrievalConfig(agent.ToolRetrievalConfig{
-		Enabled:       cfg.AgentRouting.Enabled,
-		TopK:          cfg.AgentRouting.TopK,
-		MinScore:      cfg.AgentRouting.MinScore,
-		FallbackToAll: cfg.AgentRouting.FallbackToAll,
-	})
-	agentInstance.SetToolRouterConfig(agent.ToolRouterConfig{
-		Enabled:             cfg.AgentRouting.RouterEnabled,
-		MinConfidence:       cfg.AgentRouting.RouterMinConfidence,
-		Timeout:             cfg.AgentRouting.RouterTimeout,
-		ErrorRerouteEnabled: cfg.AgentRouting.ErrorRerouteEnabled,
-		ErrorRerouteTimeout: cfg.AgentRouting.ErrorRerouteTimeout,
-	})
-	agentInstance.SetResponsePolicyConfig(agent.ResponsePolicyConfig{
-		Mode:                 agent.ResponseMode(cfg.AgentRouting.ResponseMode),
-		SummarizeTimeout:     cfg.AgentRouting.SummarizeTimeout,
-		SummarizeOnToolError: cfg.AgentRouting.SummarizeOnToolError,
-	})
+	agentInstance := buildConfiguredAgent(cfg, llmClient, toolManager, memoryManager, humanInTheLoop, nil)
+	var approvalStore agent.ApprovalStore
 
 	if cfg.Redis.Enabled {
 		rdb := redis.NewClient(&redis.Options{
@@ -109,7 +90,8 @@ func NewServer(cfg *config.Config) *Server {
 			Password: cfg.Redis.Password,
 			DB:       cfg.Redis.DB,
 		})
-		agentInstance.SetApprovalStore(agent.NewRedisApprovalStore(rdb, cfg.Redis.Prefix))
+		approvalStore = agent.NewRedisApprovalStore(rdb, cfg.Redis.Prefix)
+		agentInstance.SetApprovalStore(approvalStore)
 	}
 
 	// 设置 LLM 到记忆管理器
@@ -158,7 +140,101 @@ func NewServer(cfg *config.Config) *Server {
 		mcpClient:     mcpClient,
 		rateLimiter:   rateLimiter,
 		startTime:     time.Now(),
+		approvalStore: approvalStore,
 	}
+}
+
+func buildConfiguredAgent(cfg *config.Config, llmClient llm.LLM, toolManager *tools.ToolManager, memoryManager *memory.MemoryManager, humanInTheLoop bool, approvalStore agent.ApprovalStore) *agent.Agent {
+	agentInstance := agent.NewAgent(llmClient, toolManager, cfg.AgentRuntime.MaxSteps, humanInTheLoop)
+	agentInstance.SetRuntimeLimits(
+		cfg.AgentRuntime.MaxSteps,
+		cfg.AgentRuntime.MaxToolCalls,
+		cfg.AgentRuntime.MaxDuration,
+	)
+	agentInstance.SetApprovalTimeout(cfg.AgentRuntime.ApprovalTimeout)
+	agentInstance.SetPolicyEngine(tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains))
+	agentInstance.SetMemoryManager(memoryManager)
+	agentInstance.SetLegacyRoutingPath(cfg.AgentRouting.FeatureFlagLegacy)
+	agentInstance.SetToolRetrievalConfig(agent.ToolRetrievalConfig{
+		Enabled:       cfg.AgentRouting.Enabled,
+		TopK:          cfg.AgentRouting.TopK,
+		MinScore:      cfg.AgentRouting.MinScore,
+		FallbackToAll: cfg.AgentRouting.FallbackToAll,
+	})
+	agentInstance.SetToolRouterConfig(agent.ToolRouterConfig{
+		Enabled:             cfg.AgentRouting.RouterEnabled,
+		MinConfidence:       cfg.AgentRouting.RouterMinConfidence,
+		Timeout:             cfg.AgentRouting.RouterTimeout,
+		ErrorRerouteEnabled: cfg.AgentRouting.ErrorRerouteEnabled,
+		ErrorRerouteTimeout: cfg.AgentRouting.ErrorRerouteTimeout,
+	})
+	agentInstance.SetResponsePolicyConfig(agent.ResponsePolicyConfig{
+		Mode:                 agent.ResponseMode(cfg.AgentRouting.ResponseMode),
+		SummarizeTimeout:     cfg.AgentRouting.SummarizeTimeout,
+		SummarizeOnToolError: cfg.AgentRouting.SummarizeOnToolError,
+	})
+	if approvalStore != nil {
+		agentInstance.SetApprovalStore(approvalStore)
+	}
+	return agentInstance
+}
+
+func (s *Server) resolveLLMForRequest(override *llmRequestOverride) (llm.LLM, *agent.Agent, string, error) {
+	if override == nil {
+		return s.llm, s.agent, "default", nil
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(override.Provider))
+	model := strings.TrimSpace(override.Model)
+	if provider == "" {
+		provider = "default"
+	}
+	if provider == "default" && model == "" {
+		return s.llm, s.agent, "default", nil
+	}
+
+	if provider == "default" {
+		provider = s.config.LLM.DefaultProvider
+	}
+	providerCfg, ok := s.config.LLM.Providers[provider]
+	if !ok {
+		return nil, nil, "", fmt.Errorf("unsupported provider: %s", provider)
+	}
+	if model == "" {
+		model = providerCfg.DefaultModel
+	}
+	if len(providerCfg.Models) > 0 {
+		allowed := false
+		for _, m := range providerCfg.Models {
+			if m == model {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, nil, "", fmt.Errorf("model %q not allowed for provider %q", model, provider)
+		}
+	}
+	if providerCfg.APIKey == "" {
+		return nil, nil, "", fmt.Errorf("llm provider %q api_key cannot be empty", provider)
+	}
+	baseURL := strings.TrimSpace(providerCfg.BaseURL)
+	if baseURL == "" && provider == "deepseek" {
+		baseURL = deepseekOpenAIBaseURL
+	}
+	if baseURL == "" {
+		return nil, nil, "", fmt.Errorf("llm provider %q base_url cannot be empty", provider)
+	}
+
+	customLLM := llm.NewOpenAI(
+		providerCfg.APIKey,
+		model,
+		baseURL,
+		s.config.LLM.MaxTokens,
+		float32(s.config.LLM.Temperature),
+	)
+	customAgent := buildConfiguredAgent(s.config, customLLM, s.toolManager, s.memoryManager, true, s.approvalStore)
+	return customLLM, customAgent, provider + ":" + model, nil
 }
 
 // Start 启动服务器
@@ -177,6 +253,7 @@ func (s *Server) Start() error {
 	http.HandleFunc("/api/chat/stream", s.rateLimiter.Middleware(s.handleChatStream))
 	http.HandleFunc("/api/chat/toolcall", s.rateLimiter.Middleware(s.handleToolCall))
 	http.HandleFunc("/api/chat/plan", s.rateLimiter.Middleware(s.handleChatWithPlanning)) // 新增：任务规划端点
+	http.HandleFunc("/api/llm/models", s.rateLimiter.Middleware(s.handleLLMModels))
 	http.HandleFunc("/api/sessions", s.rateLimiter.Middleware(s.handleSessions))
 	http.HandleFunc("/api/sessions/{id}", s.rateLimiter.Middleware(s.handleSession))
 
@@ -228,8 +305,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// 解析请求
 	var req struct {
-		SessionID string `json:"session_id"`
-		Message   string `json:"message"`
+		SessionID string              `json:"session_id"`
+		Message   string              `json:"message"`
+		LLM       *llmRequestOverride `json:"llm,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -246,6 +324,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		"message_length": len(req.Message),
 		"client_ip":      r.RemoteAddr,
 	})
+	_, runtimeAgent, llmSelection, err := s.resolveLLMForRequest(req.LLM)
+	if err != nil {
+		logging.IncrMetricWithLabels("chat_requests_errors", map[string]string{"endpoint": "/api/chat"})
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, err.Error(), false)
+		return
+	}
 
 	// 确保会话存在
 	s.memoryManager.AddSession(req.SessionID)
@@ -270,7 +354,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 运行Agent
-	response, err := s.agent.Run(r.Context(), req.SessionID, req.Message)
+	response, err := runtimeAgent.Run(r.Context(), req.SessionID, req.Message)
 	if err != nil {
 		logging.IncrMetricWithLabels("chat_requests_errors", map[string]string{"endpoint": "/api/chat"})
 		writeAPIError(w, http.StatusInternalServerError, ErrAgentRunFailed, "Failed to process message", true)
@@ -297,6 +381,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		"session_id":      req.SessionID,
 		"response_length": len(response),
 		"processing_time": processingTime,
+		"llm_selection":   llmSelection,
 	})
 
 	// 记录处理时间
@@ -323,8 +408,9 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 
 	// 解析请求
 	var req struct {
-		SessionID string `json:"session_id"`
-		Message   string `json:"message"`
+		SessionID string              `json:"session_id"`
+		Message   string              `json:"message"`
+		LLM       *llmRequestOverride `json:"llm,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -337,6 +423,12 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 		"session_id":     req.SessionID,
 		"message_length": len(req.Message),
 	})
+	_, runtimeAgent, _, err := s.resolveLLMForRequest(req.LLM)
+	if err != nil {
+		logging.IncrMetricWithLabels("chat_planning_requests_errors", map[string]string{"endpoint": "/api/chat/plan"})
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, err.Error(), false)
+		return
+	}
 
 	// 确保会话存在
 	s.memoryManager.AddSession(req.SessionID)
@@ -345,7 +437,7 @@ func (s *Server) handleChatWithPlanning(w http.ResponseWriter, r *http.Request) 
 	s.memoryManager.AddMessage(req.SessionID, "user", req.Message)
 
 	// 使用任务规划运行Agent
-	response, err := s.agent.RunWithPlanning(r.Context(), req.SessionID, req.Message)
+	response, err := runtimeAgent.RunWithPlanning(r.Context(), req.SessionID, req.Message)
 	if err != nil {
 		logging.IncrMetricWithLabels("chat_planning_requests_errors", map[string]string{"endpoint": "/api/chat/plan"})
 		writeAPIError(w, http.StatusInternalServerError, ErrAgentRunFailed, "Failed to process message", true)
@@ -440,8 +532,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	// 解析请求
 	var req struct {
-		SessionID string `json:"session_id"`
-		Message   string `json:"message"`
+		SessionID string              `json:"session_id"`
+		Message   string              `json:"message"`
+		LLM       *llmRequestOverride `json:"llm,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -458,6 +551,12 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		"message_length": len(req.Message),
 		"client_ip":      r.RemoteAddr,
 	})
+	_, runtimeAgent, llmSelection, err := s.resolveLLMForRequest(req.LLM)
+	if err != nil {
+		logging.IncrMetricWithLabels("chat_stream_requests_errors", map[string]string{"endpoint": "/api/chat/stream"})
+		writeAPIError(w, http.StatusBadRequest, ErrInvalidRequest, err.Error(), false)
+		return
+	}
 
 	// 确保会话存在
 	s.memoryManager.AddSession(req.SessionID)
@@ -487,7 +586,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	// 运行Agent流式
-	finalReply, runErr := s.agent.RunStream(r.Context(), req.SessionID, req.Message, func(chunk string) error {
+	finalReply, runErr := runtimeAgent.RunStream(r.Context(), req.SessionID, req.Message, func(chunk string) error {
 		writeSSEData(w, chunk)
 		return nil
 	})
@@ -512,6 +611,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Stream chat request processed", map[string]interface{}{
 		"session_id":      req.SessionID,
 		"processing_time": processingTime,
+		"llm_selection":   llmSelection,
 	})
 
 	// 记录处理时间
@@ -522,6 +622,37 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			"processing_time": processingTime,
 		})
 	}
+}
+
+func (s *Server) handleLLMModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrInvalidMethod, "Method not allowed", false)
+		return
+	}
+	type providerResp struct {
+		Name         string   `json:"name"`
+		DefaultModel string   `json:"default_model"`
+		Models       []string `json:"models"`
+	}
+	providers := make([]providerResp, 0, len(s.config.LLM.Providers))
+	for name, cfg := range s.config.LLM.Providers {
+		models := make([]string, 0, len(cfg.Models))
+		models = append(models, cfg.Models...)
+		if len(models) == 0 && cfg.DefaultModel != "" {
+			models = append(models, cfg.DefaultModel)
+		}
+		providers = append(providers, providerResp{
+			Name:         name,
+			DefaultModel: cfg.DefaultModel,
+			Models:       models,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"default_provider": s.config.LLM.DefaultProvider,
+		"providers":        providers,
+	})
 }
 
 // handleSessions 处理会话列表请求

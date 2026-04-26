@@ -11,9 +11,22 @@ server:
 
 # LLM 配置
 llm:
-  api_key: "your-api-key-here"  # ⚠️ 请替换为你的 API Key
-  model: "qwen3.5-plus"
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  default_provider: "qwen"
+  providers:
+    qwen:
+      api_key: "your-qwen-api-key-here"
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      default_model: "qwen3.6-plus"
+      models:
+        - "qwen3.6-plus"
+        - "qwen-plus"
+    deepseek:
+      api_key: "your-deepseek-api-key-here"
+      base_url: "https://api.deepseek.com/v1"
+      default_model: "deepseek-chat"
+      models:
+        - "deepseek-chat"
+        - "deepseek-reasoner"
   max_tokens: 2000
   temperature: 0.7
   retry:

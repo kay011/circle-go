@@ -35,13 +35,22 @@ type ServerConfig struct {
 
 // LLMConfig LLM配置
 type LLMConfig struct {
-	APIKey         string      `yaml:"api_key"`
-	Model          string      `yaml:"model"`
-	BaseURL        string      `yaml:"base_url"`
-	MaxTokens      int         `yaml:"max_tokens"`
-	Temperature    float64     `yaml:"temperature"`
-	Retry          RetryConfig `yaml:"retry"`
-	CircuitBreaker CBConfig    `yaml:"circuit_breaker"`
+	DefaultProvider string                       `yaml:"default_provider"`
+	Providers       map[string]LLMProviderConfig `yaml:"providers"`
+	APIKey          string                       `yaml:"api_key"`  // legacy
+	Model           string                       `yaml:"model"`    // legacy
+	BaseURL         string                       `yaml:"base_url"` // legacy
+	MaxTokens       int                          `yaml:"max_tokens"`
+	Temperature     float64                      `yaml:"temperature"`
+	Retry           RetryConfig                  `yaml:"retry"`
+	CircuitBreaker  CBConfig                     `yaml:"circuit_breaker"`
+}
+
+type LLMProviderConfig struct {
+	APIKey       string   `yaml:"api_key"`
+	BaseURL      string   `yaml:"base_url"`
+	DefaultModel string   `yaml:"default_model"`
+	Models       []string `yaml:"models"`
 }
 
 // RetryConfig 重试配置
@@ -183,11 +192,55 @@ func setDefaults(cfg *Config) {
 	}
 
 	// LLM defaults
-	if cfg.LLM.Model == "" {
-		cfg.LLM.Model = "gpt-4"
+	if cfg.LLM.Providers == nil {
+		cfg.LLM.Providers = map[string]LLMProviderConfig{}
 	}
-	if cfg.LLM.BaseURL == "" {
-		cfg.LLM.BaseURL = "https://api.openai.com/v1"
+	// 兼容旧版单模型配置：自动映射到 default provider
+	if len(cfg.LLM.Providers) == 0 {
+		provider := LLMProviderConfig{
+			APIKey:       cfg.LLM.APIKey,
+			BaseURL:      cfg.LLM.BaseURL,
+			DefaultModel: cfg.LLM.Model,
+		}
+		if provider.DefaultModel == "" {
+			provider.DefaultModel = "gpt-4"
+		}
+		if provider.BaseURL == "" {
+			provider.BaseURL = "https://api.openai.com/v1"
+		}
+		if len(provider.Models) == 0 {
+			provider.Models = []string{provider.DefaultModel}
+		}
+		cfg.LLM.Providers["default"] = provider
+	}
+	if cfg.LLM.DefaultProvider == "" {
+		if _, ok := cfg.LLM.Providers["qwen"]; ok {
+			cfg.LLM.DefaultProvider = "qwen"
+		} else {
+			cfg.LLM.DefaultProvider = "default"
+		}
+	}
+	// 同步 legacy 字段，减少旧代码改动面
+	defaultCfg, ok := cfg.LLM.Providers[cfg.LLM.DefaultProvider]
+	if !ok && len(cfg.LLM.Providers) > 0 {
+		for name, p := range cfg.LLM.Providers {
+			cfg.LLM.DefaultProvider = name
+			defaultCfg = p
+			ok = true
+			break
+		}
+	}
+	if ok {
+		if defaultCfg.DefaultModel == "" && len(defaultCfg.Models) > 0 {
+			defaultCfg.DefaultModel = defaultCfg.Models[0]
+		}
+		if len(defaultCfg.Models) == 0 && defaultCfg.DefaultModel != "" {
+			defaultCfg.Models = []string{defaultCfg.DefaultModel}
+		}
+		cfg.LLM.Providers[cfg.LLM.DefaultProvider] = defaultCfg
+		cfg.LLM.APIKey = defaultCfg.APIKey
+		cfg.LLM.BaseURL = defaultCfg.BaseURL
+		cfg.LLM.Model = defaultCfg.DefaultModel
 	}
 	if cfg.LLM.MaxTokens == 0 {
 		cfg.LLM.MaxTokens = 2000
@@ -350,8 +403,24 @@ func validate(cfg *Config) error {
 	}
 
 	// 验证 LLM 配置
-	if cfg.LLM.APIKey == "" {
-		return fmt.Errorf("LLM API key cannot be empty")
+	if len(cfg.LLM.Providers) == 0 {
+		return fmt.Errorf("LLM providers cannot be empty")
+	}
+	if cfg.LLM.DefaultProvider == "" {
+		return fmt.Errorf("LLM default_provider cannot be empty")
+	}
+	defaultCfg, ok := cfg.LLM.Providers[cfg.LLM.DefaultProvider]
+	if !ok {
+		return fmt.Errorf("LLM default_provider %q not found in providers", cfg.LLM.DefaultProvider)
+	}
+	if defaultCfg.APIKey == "" {
+		return fmt.Errorf("LLM provider %q api_key cannot be empty", cfg.LLM.DefaultProvider)
+	}
+	if defaultCfg.BaseURL == "" {
+		return fmt.Errorf("LLM provider %q base_url cannot be empty", cfg.LLM.DefaultProvider)
+	}
+	if defaultCfg.DefaultModel == "" {
+		return fmt.Errorf("LLM provider %q default_model cannot be empty", cfg.LLM.DefaultProvider)
 	}
 
 	// 验证温度范围

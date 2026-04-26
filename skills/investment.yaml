@@ -1,0 +1,32 @@
+tools:
+  - name: "investment_analyzer"
+    id: "skill.investment.analyzer"
+    version: "1.0.0"
+    display_name: "投资分析 Skill"
+    owner: "skills/investment"
+    risk_level: "medium"
+    intent_tags:
+      - "股票分析"
+      - "基金分析"
+      - "估值"
+      - "量化"
+    policy:
+      timeout_seconds: 22
+      approval: "never"
+
+  - name: "fund_compare"
+    id: "skill.investment.fund_compare"
+    version: "1.0.0"
+    display_name: "基金对比 Skill"
+    owner: "skills/investment"
+    risk_level: "medium"
+    intent_tags:
+      - "基金对比"
+      - "夏普"
+      - "回撤"
+      - "收益率"
+      - "规模"
+    policy:
+      timeout_seconds: 28
+      approval: "never"
+

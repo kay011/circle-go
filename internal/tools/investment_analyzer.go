@@ -61,6 +61,17 @@ func (t *investmentAnalyzerTool) Description() string {
 	return "根据股票或基金名称/代码获取公开市场信息，并给出量化投资价值评分（仅供研究，不构成投资建议）。"
 }
 
+func (t *investmentAnalyzerTool) Metadata() ToolMetadata {
+	return ToolMetadata{
+		ID:          "investment.analyzer",
+		Version:     "1.0.0",
+		IntentTags:  []string{"股票", "基金", "投资", "估值", "pe", "量化评分"},
+		RiskLevel:   "medium",
+		Owner:       "investment-pack",
+		DisplayName: "投资分析",
+	}
+}
+
 func (t *investmentAnalyzerTool) Parameters() map[string]Property {
 	return map[string]Property{
 		"name_or_code": {

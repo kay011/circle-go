@@ -1,0 +1,35 @@
+tools:
+  - name: "investment_analyzer"
+    id: "investment.analyzer"
+    version: "1.0.0"
+    display_name: "投资分析"
+    owner: "investment-pack"
+    risk_level: "medium"
+    intent_tags:
+      - "股票"
+      - "基金"
+      - "投资"
+      - "估值"
+      - "pe"
+      - "量化评分"
+    policy:
+      timeout_seconds: 20
+      approval: "never"
+
+  - name: "fund_compare"
+    id: "investment.fund_compare"
+    version: "1.0.0"
+    display_name: "基金对比"
+    owner: "investment-pack"
+    risk_level: "medium"
+    intent_tags:
+      - "基金对比"
+      - "夏普比率"
+      - "最大回撤"
+      - "年化收益"
+      - "规模"
+      - "排名"
+    policy:
+      timeout_seconds: 25
+      approval: "never"
+

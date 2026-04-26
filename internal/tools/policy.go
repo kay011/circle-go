@@ -31,24 +31,56 @@ type PolicyEngine interface {
 // DefaultPolicyEngine 默认策略引擎（最小可用版本）。
 type DefaultPolicyEngine struct {
 	TrustedHTTPDomains []string
+	perToolApproval    map[string]string
 }
 
 // NewDefaultPolicyEngine 创建默认策略引擎。
 func NewDefaultPolicyEngine(trustedHTTPDomains []string) *DefaultPolicyEngine {
 	return &DefaultPolicyEngine{
 		TrustedHTTPDomains: trustedHTTPDomains,
+		perToolApproval:    map[string]string{},
 	}
+}
+
+// SetToolApprovalPolicy 设置工具审批策略：
+// - always: 总是要求审批（除非被 deny）
+// - conditional: 使用默认策略判断
+// - never: 不要求审批（但 deny 仍生效）
+func (e *DefaultPolicyEngine) SetToolApprovalPolicy(toolName, mode string) {
+	toolName = strings.TrimSpace(toolName)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if toolName == "" || mode == "" {
+		return
+	}
+	e.perToolApproval[toolName] = mode
 }
 
 // Evaluate 根据工具和参数返回 allow / require_approval / deny。
 func (e *DefaultPolicyEngine) Evaluate(_ context.Context, toolName string, args map[string]interface{}) PolicyResult {
+	result := PolicyResult{Decision: PolicyAllow}
 	switch toolName {
 	case "file_operation":
-		return e.evaluateFileOperation(args)
+		result = e.evaluateFileOperation(args)
 	case "http_client":
-		return e.evaluateHTTPClient(args)
+		result = e.evaluateHTTPClient(args)
 	default:
-		return PolicyResult{Decision: PolicyAllow}
+		result = PolicyResult{Decision: PolicyAllow}
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(e.perToolApproval[toolName]))
+	switch mode {
+	case "always":
+		if result.Decision != PolicyDeny {
+			return PolicyResult{Decision: PolicyRequireApproval, Reason: "工具策略要求始终审批"}
+		}
+		return result
+	case "never":
+		if result.Decision == PolicyRequireApproval {
+			return PolicyResult{Decision: PolicyAllow, Reason: "工具策略配置为免审批"}
+		}
+		return result
+	default:
+		return result
 	}
 }
 

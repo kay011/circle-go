@@ -12,6 +12,8 @@ import (
 type Config struct {
 	Server       ServerConfig       `yaml:"server"`
 	LLM          LLMConfig          `yaml:"llm"`
+	Tools        ToolsConfig        `yaml:"tools"`
+	Skills       SkillsConfig       `yaml:"skills"`
 	Memory       MemoryConfig       `yaml:"memory"`
 	Redis        RedisConfig        `yaml:"redis"`
 	RateLimit    RateLimitConfig    `yaml:"rate_limit"`
@@ -145,6 +147,18 @@ type AgentRoutingConfig struct {
 	SummarizeTimeout     time.Duration `yaml:"summarize_timeout"`
 	SummarizeOnToolError bool          `yaml:"summarize_on_tool_error"`
 	FeatureFlagLegacy    bool          `yaml:"feature_flag_legacy"`
+}
+
+// ToolsConfig 工具注册配置（用于配置化装配，避免主流程硬编码）
+type ToolsConfig struct {
+	Enabled      []string `yaml:"enabled"`
+	ManifestPath string   `yaml:"manifest_path"`
+}
+
+// SkillsConfig skills 目录配置（类似 claude-code skills 文件夹）
+type SkillsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
 }
 
 // Load 加载配置文件
@@ -327,6 +341,24 @@ func setDefaults(cfg *Config) {
 		cfg.MCP.URL = "http://localhost:8000"
 	}
 
+	// Tools defaults
+	if len(cfg.Tools.Enabled) == 0 {
+		cfg.Tools.Enabled = []string{
+			"calculator",
+			"web_search",
+			"file_operation",
+			"http_client",
+			"investment_analyzer",
+			"fund_compare",
+		}
+	}
+	if cfg.Tools.ManifestPath == "" {
+		cfg.Tools.ManifestPath = "config/tools.manifests.yaml"
+	}
+	if cfg.Skills.Path == "" {
+		cfg.Skills.Path = "skills"
+	}
+
 	// Logging defaults
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
@@ -486,6 +518,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.AgentRouting.TopK <= 0 {
 		return fmt.Errorf("agent_routing top_k must be positive")
+	}
+	if len(cfg.Tools.Enabled) == 0 {
+		return fmt.Errorf("tools enabled cannot be empty")
+	}
+	if cfg.Skills.Enabled && cfg.Skills.Path == "" {
+		return fmt.Errorf("skills path cannot be empty when skills is enabled")
 	}
 	if cfg.AgentRouting.RouterMinConfidence < 0 || cfg.AgentRouting.RouterMinConfidence > 1 {
 		return fmt.Errorf("agent_routing router_min_confidence must be between 0 and 1")

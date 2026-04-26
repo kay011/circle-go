@@ -68,13 +68,11 @@ func NewServer(cfg *config.Config) *Server {
 		float32(cfg.LLM.Temperature),
 	)
 
-	// 初始化工具管理器
-	toolManager := tools.NewToolManager()
-	toolManager.Register(tools.NewCalculatorTool())
-	toolManager.Register(tools.NewWebSearchTool(cfg.Search.SearxInstances))
-	toolManager.Register(tools.NewFileTool())
-	toolManager.Register(tools.NewHTTPClientTool()) // 新增：HTTP客户端工具
-	toolManager.Register(tools.NewInvestmentAnalyzerTool())
+	// 初始化工具管理器（配置化注册，避免主流程硬编码）
+	toolManager, err := tools.BuildToolManagerFromConfig(cfg)
+	if err != nil {
+		panic(fmt.Errorf("failed to build tools from config: %w", err))
+	}
 
 	// 初始化记忆管理器
 	memoryManager := memory.NewMemoryManager(cfg.Memory.ShortTermSize, cfg.Memory.LongTermPath)
@@ -127,6 +125,11 @@ func NewServer(cfg *config.Config) *Server {
 		}
 		logger.Info("Tool gateway audit", fields)
 	})
+	if policyMap, err := tools.BuildToolPolicyMapFromConfig(cfg, cfg.AgentRuntime.ToolTimeout); err == nil {
+		for toolName, policy := range policyMap {
+			toolGateway.SetPolicy(toolName, policy)
+		}
+	}
 	agentInstance.SetToolGateway(toolGateway)
 
 	return &Server{
@@ -152,7 +155,13 @@ func buildConfiguredAgent(cfg *config.Config, llmClient llm.LLM, toolManager *to
 		cfg.AgentRuntime.MaxDuration,
 	)
 	agentInstance.SetApprovalTimeout(cfg.AgentRuntime.ApprovalTimeout)
-	agentInstance.SetPolicyEngine(tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains))
+	policyEngine := tools.NewDefaultPolicyEngine(cfg.AgentRuntime.TrustedHTTPDomains)
+	if approvalMap, err := tools.BuildToolApprovalPolicyMapFromConfig(cfg); err == nil {
+		for toolName, mode := range approvalMap {
+			policyEngine.SetToolApprovalPolicy(toolName, mode)
+		}
+	}
+	agentInstance.SetPolicyEngine(policyEngine)
 	agentInstance.SetMemoryManager(memoryManager)
 	agentInstance.SetLegacyRoutingPath(cfg.AgentRouting.FeatureFlagLegacy)
 	agentInstance.SetToolRetrievalConfig(agent.ToolRetrievalConfig{

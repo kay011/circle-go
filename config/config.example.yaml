@@ -64,6 +64,22 @@ file_tool:
   allowed_directory: "./data"  # 允许的文件目录
   max_file_size: 10485760      # 最大文件大小（10MB）
 
+# 工具注册配置（配置化扩展：新增工具无需改主流程）
+tools:
+  manifest_path: "config/tools.manifests.yaml"
+  enabled:
+    - "calculator"
+    - "web_search"
+    - "file_operation"
+    - "http_client"
+    - "investment_analyzer"
+    - "fund_compare"
+
+# Skills 目录（类似 claude-code 的 skills 文件夹）
+skills:
+  enabled: true
+  path: "skills"
+
 # 搜索配置
 search:
   searx_instances:

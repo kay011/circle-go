@@ -67,3 +67,31 @@ func TestDefaultPolicyEngine_HTTPClient(t *testing.T) {
 		t.Fatalf("expected allow, got %s", allow.Decision)
 	}
 }
+
+func TestDefaultPolicyEngine_ManifestApprovalOverride(t *testing.T) {
+	engine := NewDefaultPolicyEngine(nil)
+
+	engine.SetToolApprovalPolicy("calculator", "always")
+	r1 := engine.Evaluate(context.Background(), "calculator", map[string]interface{}{"expression": "1+1"})
+	if r1.Decision != PolicyRequireApproval {
+		t.Fatalf("expected always override to require approval, got %s", r1.Decision)
+	}
+
+	engine.SetToolApprovalPolicy("http_client", "never")
+	r2 := engine.Evaluate(context.Background(), "http_client", map[string]interface{}{
+		"method": "POST",
+		"url":    "https://api.example.com/v1",
+	})
+	if r2.Decision != PolicyAllow {
+		t.Fatalf("expected never override to allow, got %s", r2.Decision)
+	}
+
+	// deny 规则优先级高于 never
+	r3 := engine.Evaluate(context.Background(), "http_client", map[string]interface{}{
+		"method": "GET",
+		"url":    "http://127.0.0.1:8080",
+	})
+	if r3.Decision != PolicyDeny {
+		t.Fatalf("expected deny to remain deny, got %s", r3.Decision)
+	}
+}

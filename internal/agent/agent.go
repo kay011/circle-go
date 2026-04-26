@@ -343,9 +343,14 @@ func prepareLLMTools(toolManager *tools.ToolManager) []llm.Tool {
 				Description: v.Description,
 			}
 		}
+		desc := tool.Description()
+		if mdTool, ok := tool.(tools.ToolMetadataProvider); ok {
+			desc = tools.BuildToolDescription(desc, mdTool.Metadata())
+		}
+
 		llmTools[i] = llm.Tool{
 			Name:        tool.Name(),
-			Description: tool.Description(),
+			Description: desc,
 			Parameters: llm.ToolParameters{
 				Type:       "object",
 				Properties: llmParams,
